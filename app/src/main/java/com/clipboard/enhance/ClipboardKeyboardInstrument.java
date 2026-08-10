@@ -28,6 +28,14 @@ import de.robv.android.xposed.XposedHelpers;
  *   - pickSuggestion(CharSequence) = 拼音候选选词上屏入口（搜索模式拦截点）
  *   - 注意：u.A(String)（sogou.u）只是剪贴板/快捷短语上屏落点，拦截它会误伤条目上屏
  * - ClipboardPage：页面，M() 创建视图（afterHookedMethod 记录实例）、w() 私有=收起面板回主键盘
+ * - p（clipboard 数据仓库，静态单例 t()，单线程池串行）：
+ *   - H(c)（static synthetic，插入上限裁剪点）：去重(Content unique) → insertOrReplace →
+ *     orderAsc(Time) 查询，size>150 则 delete(list.get(0)) 删除最旧 —— 上限 150 条
+ *     绕过：before 备份最旧条目，after 无条件 insertOrReplace 插回（未超限时幂等无害）
+ *   - db 链：db.a.b().a().a() → ClipboardItemDao（主键自增 _id，实体带 id 插回安全）
+ * - ClipboardCandidateView.setClipboardCount(int,int)：标题旁数字（Canvas 绘制）：
+ *   mCountText = String.format(getString(R$string.clipboard_count_text), mCount)
+ *   覆写 mCountText 为「当前显示数量/当前总数量」并 invalidate 即可
  */
 public final class ClipboardKeyboardInstrument {
 
@@ -41,11 +49,19 @@ public final class ClipboardKeyboardInstrument {
     /** 拼音候选选词入口（路径与剪贴板上屏 u.A() 完全分离） */
     private static final String CLS_INPUT_LOGIC = "com.sohu.inputmethod.input.InputLogic";
 
+    /** 剪贴板数据仓库（150 条上限裁剪点 p.H，static synthetic，lambda 桥接名保留） */
+    private static final String CLS_CLIP_REPO = "com.sohu.inputmethod.clipboard.p";
+    /** 剪贴板条目实体（db.c 实体的混淆名，字段 d=content、c=time） */
+    private static final String CLS_CLIP_ITEM = "com.sohu.inputmethod.clipboard.c";
+    /** 数据库门面 → session → dao 链：db.a.b().a().a() */
+    private static final String CLS_DB_A = "com.sohu.inputmethod.clipboard.db.a";
+
     /** 模块状态 */
     private static volatile boolean sSearchMode = false;
     private static volatile Object sPage;          // ClipboardPage 实例
     private static volatile Object sKeyboard;      // ClipboardKeyboard 实例
     private static volatile ClassLoader sCl;       // 目标进程类加载器
+    private static volatile Object sCandidateView; // ClipboardCandidateView 实例（drawBase 记录）
 
     /** 模块按钮矩形（随 drawBase 每次更新，供 touchInButton 命中） */
     private static final Rect sSearchRect = new Rect();
@@ -66,6 +82,8 @@ public final class ClipboardKeyboardInstrument {
             hookKeyboardItem(cl);
             hookCommit(cl);
             hookPageCreate(cl);
+            hookClipboardLimit(cl);
+            hookCandidateCount(cl);
             XposedBridge.log("[ClipboardEnhance] all hooks installed");
         } catch (Throwable t) {
             XposedBridge.log("[ClipboardEnhance] init error: " + t);
@@ -80,6 +98,7 @@ public final class ClipboardKeyboardInstrument {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                             try {
+                                sCandidateView = param.thisObject;
                                 drawModuleButtons((View) param.thisObject, (Canvas) param.args[0]);
                             } catch (Throwable t) {
                                 XposedBridge.log("[ClipboardEnhance] drawBase after error: " + t);
@@ -282,6 +301,8 @@ public final class ClipboardKeyboardInstrument {
         } catch (Throwable t) {
             XposedBridge.log("[ClipboardEnhance] swapList error: " + t);
         }
+        // 过滤/恢复后同步刷新标题旁数字（当前显示/总数）
+        refreshCountText(null);
     }
 
     /* ================= 4a. 剪贴板条目上屏：兜底复位搜索模式 =================
@@ -354,6 +375,121 @@ public final class ClipboardKeyboardInstrument {
         } catch (Throwable t) {
             XposedBridge.log("[ClipboardEnhance] hook page.M failed: " + t);
         }
+    }
+
+    /* ================= 6. 去除 150 条上限 =================
+       插入入口 H(c)：去重 → insertOrReplace → 超过 150 条删除最旧。
+       before 备份最旧条目，after 无条件重新插入 —— 原逻辑删除的正是它，
+       插回后等效「无上限」；未超限时插回是幂等更新（主键自增 _id，实体带 id），无副作用 */
+    private static void hookClipboardLimit(ClassLoader cl) {
+        try {
+            XposedHelpers.findAndHookMethod(CLS_CLIP_REPO, cl, "H", CLS_CLIP_ITEM,
+                    new XC_MethodHook() {
+                        private volatile Object sOldestBackup; // 单线程池串行，volatile 仅防御
+
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            sOldestBackup = null;
+                            try {
+                                Object dao = getClipboardDao();
+                                if (dao == null) {
+                                    return;
+                                }
+                                // 按时间升序取最旧一条（与原逻辑 orderAsc(Time).list().get(0) 一致）
+                                Object timeProp = XposedHelpers.getStaticObjectField(
+                                        XposedHelpers.findClass(
+                                                "com.sohu.inputmethod.clipboard.db.ClipboardItemDao$Properties", cl),
+                                        "Time");
+                                Object qb = XposedHelpers.callMethod(dao, "queryBuilder");
+                                Object qbAsc = XposedHelpers.callMethod(qb, "orderAsc", timeProp);
+                                List<?> all = (List<?>) XposedHelpers.callMethod(qbAsc, "list");
+                                if (all != null && !all.isEmpty()) {
+                                    sOldestBackup = all.get(0);
+                                }
+                            } catch (Throwable t) {
+                                XposedBridge.log("[ClipboardEnhance] backup oldest failed: " + t);
+                            }
+                        }
+
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            Object backup = sOldestBackup;
+                            sOldestBackup = null;
+                            if (backup == null) {
+                                return;
+                            }
+                            try {
+                                Object dao = getClipboardDao();
+                                if (dao != null) {
+                                    XposedHelpers.callMethod(dao, "insertOrReplace", backup);
+                                }
+                            } catch (Throwable t) {
+                                XposedBridge.log("[ClipboardEnhance] restore oldest failed: " + t);
+                            }
+                        }
+                    });
+            XposedBridge.log("[ClipboardEnhance] 150-limit bypass installed");
+        } catch (Throwable t) {
+            XposedBridge.log("[ClipboardEnhance] hook p.H failed: " + t);
+        }
+    }
+
+    /** db.a.b().a().a() → ClipboardItemDao（链式反射，任一步失败返回 null） */
+    private static Object getClipboardDao() {
+        try {
+            Class<?> dbA = XposedHelpers.findClass(CLS_DB_A, sCl);
+            Object holder = XposedHelpers.callStaticMethod(dbA, "b");
+            Object session = XposedHelpers.callMethod(holder, "a");
+            return XposedHelpers.callMethod(session, "a");
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /* ================= 7. 标题数字 → 「当前显示数量/当前总数量」 =================
+       原生 setClipboardCount(i,i2)：mCountText = String.format(getString(clipboard_count_text), i)
+       after 覆写 mCountText：保留原生格式串（如 "(%d)" → "5/20"），数字为 显示数/总数 */
+    private static void hookCandidateCount(ClassLoader cl) {
+        try {
+            XposedHelpers.findAndHookMethod(CLS_CANDIDATE, cl, "setClipboardCount", int.class, int.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            try {
+                                refreshCountText(param.thisObject);
+                            } catch (Throwable t) {
+                                XposedBridge.log("[ClipboardEnhance] setClipboardCount error: " + t);
+                            }
+                        }
+                    });
+            XposedBridge.log("[ClipboardEnhance] count text hook installed");
+        } catch (Throwable t) {
+            XposedBridge.log("[ClipboardEnhance] hook setClipboardCount failed: " + t);
+        }
+    }
+
+    /** 将标题旁数字刷新为「当前显示数量/当前总数量」 */
+    private static void refreshCountText(Object candidateView) {
+        if (candidateView == null) {
+            candidateView = sCandidateView;
+        }
+        if (candidateView == null) {
+            return;
+        }
+        int total = ListFilterProxy.totalCount();
+        int shown = ListFilterProxy.filteredCount();
+        if (total <= 0) {
+            return; // 列表尚未加载，保持原生行为（原方法已设置 mCountText）
+        }
+        // 原生格式串 clipboard_count_text 内写死了上限 150（如 "(%d/150)"），
+        // 既然已去除上限，不再沿用格式串，直接输出纯「当前显示/总数」数字
+        String text = shown + "/" + total;
+        try {
+            XposedHelpers.setObjectField(candidateView, "mCountText", text);
+        } catch (Throwable t) {
+            return;
+        }
+        ((View) candidateView).invalidate();
     }
 
     /* ================= 模块动作 ================= */

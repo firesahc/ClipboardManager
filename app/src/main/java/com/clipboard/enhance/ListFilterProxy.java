@@ -62,6 +62,11 @@ public final class ListFilterProxy {
         return sActive == null ? 0 : sActive.size();
     }
 
+    /** 全量条目数（最近一次 onChanged 上报；无列表时为 0） */
+    public static int totalCount() {
+        return sOriginal == null ? 0 : sOriginal.size();
+    }
+
     private static void applyFilter() {
         List<Object> src = sOriginal;
         if (src == null) {
