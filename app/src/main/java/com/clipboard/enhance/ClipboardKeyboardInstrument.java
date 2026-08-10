@@ -84,6 +84,7 @@ public final class ClipboardKeyboardInstrument {
             hookPageCreate(cl);
             hookClipboardLimit(cl);
             hookCandidateCount(cl);
+            hookAdapterSelectAll(cl);
             XposedBridge.log("[ClipboardEnhance] all hooks installed");
         } catch (Throwable t) {
             XposedBridge.log("[ClipboardEnhance] init error: " + t);
@@ -162,7 +163,7 @@ public final class ClipboardKeyboardInstrument {
             // 纯文字绘制，与原生按钮风格一致，不画背景
             float baseY = (sSearchRect.top + sSearchRect.bottom) / 2f
                     - (paint.descent() + paint.ascent()) / 2f;
-            canvas.drawText(label, left + pad / 2f, baseY, moduleTextPaint(paint, false));
+            canvas.drawText(label, left + pad / 2f, baseY, moduleTextPaint(view, paint, false));
 
             sCommitAllRectValid = false; // 非整理态无此按钮
         } else {
@@ -190,17 +191,23 @@ public final class ClipboardKeyboardInstrument {
             // 纯文字绘制，与原生按钮风格一致，不画背景
             float baseY = (sCommitAllRect.top + sCommitAllRect.bottom) / 2f
                     - (paint.descent() + paint.ascent()) / 2f;
-            canvas.drawText(label, left + pad / 2f, baseY, moduleTextPaint(paint, true));
+            canvas.drawText(label, left + pad / 2f, baseY, moduleTextPaint(view, paint, true));
 
             sSearchRectValid = false;
         }
     }
 
-    private static Paint moduleTextPaint(Paint base, boolean selecting) {
+    /** 模块按钮画笔：颜色采自原生按钮当前色（已含主题/暗色适配），与原生观感一致 */
+    private static Paint moduleTextPaint(View view, Paint base, boolean selecting) {
         Paint p = new Paint(base);
         p.setStyle(Paint.Style.FILL);
-        // 沿用原生画笔风格：仅加深颜色，突出模块按钮（不带背景色）
-        p.setColor(0xFF2563EB); // 统一主题蓝
+        int color = 0xFF9F9B95; // 兜底：原生 TEXT_BTN_TEXT_COLOR（灰）
+        try {
+            // 原生颜色字段：非整理态「整理」= mSelectingBtnColor，整理态「全选」= mSelectingAllTextColor
+            color = XposedHelpers.getIntField(view, selecting ? "mSelectingAllTextColor" : "mSelectingBtnColor");
+        } catch (Throwable ignored) {
+        }
+        p.setColor(color);
         return p;
     }
 
@@ -465,6 +472,37 @@ public final class ClipboardKeyboardInstrument {
             XposedBridge.log("[ClipboardEnhance] count text hook installed");
         } catch (Throwable t) {
             XposedBridge.log("[ClipboardEnhance] hook setClipboardCount failed: " + t);
+        }
+    }
+
+    /* ================= 8. 全选 → 只选当前筛选结果 =================
+       原生全选链路：全选按钮 → onMenuClick(15) → a(6) → Page.L(6) →
+       Keyboard.I(isAllSelected) → adapter.l(boolean) 遍历 this.j 全部置勾选。
+       adapter.j 为显示列表（getCount/getView/g() 勾选集合均基于它）；
+       进入整理态时 j 可能被原生重置为全量列表（Q() → N.o(this.M)），
+       导致全选勾上筛选范围外的条目。此处 before 强制把 j 换回当前生效过滤列表：
+       - 过滤中：j = 过滤子集（只全选筛选出的项）
+       - 未过滤：j = 全量（与原生行为一致）
+       由 swapList() 写回的 j 本来就是这个值，重复赋值幂等无害 */
+    private static void hookAdapterSelectAll(ClassLoader cl) {
+        try {
+            XposedHelpers.findAndHookMethod(CLS_ADAPTER, cl, "l", boolean.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            try {
+                                List<Object> active = ListFilterProxy.activeList();
+                                if (active != null) {
+                                    XposedHelpers.setObjectField(param.thisObject, "j", active);
+                                }
+                            } catch (Throwable t) {
+                                XposedBridge.log("[ClipboardEnhance] select-all scope error: " + t);
+                            }
+                        }
+                    });
+            XposedBridge.log("[ClipboardEnhance] select-all scope hook installed");
+        } catch (Throwable t) {
+            XposedBridge.log("[ClipboardEnhance] hook adapter.l failed: " + t);
         }
     }
 
