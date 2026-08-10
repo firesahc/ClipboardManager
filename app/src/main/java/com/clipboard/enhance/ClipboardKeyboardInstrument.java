@@ -3,6 +3,7 @@ package com.clipboard.enhance;
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Rect;
+import android.os.SystemClock;
 import android.view.View;
 
 import java.util.List;
@@ -68,6 +69,12 @@ public final class ClipboardKeyboardInstrument {
     private static final Rect sCommitAllRect = new Rect();
     private static volatile boolean sSearchRectValid = false;
     private static volatile boolean sCommitAllRectValid = false;
+    // 触摸去抖：DOWN/UP 事件序列会连续两次命中 touchInButton，
+    // 去抖后只处理第一次（否则「全部」清除后 UP 再次命中会误触「搜索」）
+    private static volatile long sLastTouchTime = 0L;
+    private static volatile float sLastTouchX = 0f;
+    private static volatile float sLastTouchY = 0f;
+    private static final long TOUCH_DEBOUNCE_MS = 500L;
 
     private ClipboardKeyboardInstrument() {
     }
@@ -85,6 +92,7 @@ public final class ClipboardKeyboardInstrument {
             hookClipboardLimit(cl);
             hookCandidateCount(cl);
             hookAdapterSelectAll(cl);
+            hookImeRestart(cl);
             XposedBridge.log("[ClipboardEnhance] all hooks installed");
         } catch (Throwable t) {
             XposedBridge.log("[ClipboardEnhance] init error: " + t);
@@ -134,7 +142,9 @@ public final class ClipboardKeyboardInstrument {
         }
 
         if (!selecting) {
-            // ---- 非整理态：「搜索」画在「整理」(getmSelectingBtnRect) 左侧 ----
+            // ---- 非整理态：「搜索/全部」画在「整理」(getmSelectingBtnRect) 左侧 ----
+            // 筛选生效时按钮变「全部」，点击清除筛选恢复全量
+            boolean filtering = ListFilterProxy.getKeyword().length() > 0;
             Rect nativeBtn;
             try {
                 nativeBtn = (Rect) XposedHelpers.callMethod(view, "getmSelectingBtnRect");
@@ -151,7 +161,7 @@ public final class ClipboardKeyboardInstrument {
             } catch (Throwable t) {
                 textSize = 14f;
             }
-            String label = "搜索";
+            String label = filtering ? "全部" : "搜索";
             float textW = paint.measureText(label);
             // 按钮 = 文字 + 内边距
             float pad = textSize * 0.9f;
@@ -243,12 +253,22 @@ public final class ClipboardKeyboardInstrument {
                                 float x = (Float) param.args[0];
                                 float y = (Float) param.args[1];
                                 if (!selecting && sSearchRectValid && sSearchRect.contains((int) x, (int) y)) {
-                                    onSearchClick();
+                                    // 去抖：DOWN/UP 事件序列会连续两次命中，只执行第一次
+                                    if (debounceTouch(x, y)) {
+                                        // 筛选生效中 → 清除筛选（「全部」）；否则进入搜索模式
+                                        if (ListFilterProxy.getKeyword().length() > 0) {
+                                            onClearFilter();
+                                        } else {
+                                            onSearchClick();
+                                        }
+                                    }
                                     param.setResult(Integer.MIN_VALUE); // 屏蔽原生命中
                                     return;
                                 }
                                 if (selecting && sCommitAllRectValid && sCommitAllRect.contains((int) x, (int) y)) {
-                                    onCommitAllClick();
+                                    if (debounceTouch(x, y)) {
+                                        onCommitAllClick();
+                                    }
                                     param.setResult(Integer.MIN_VALUE);
                                 }
                             } catch (Throwable t) {
@@ -530,7 +550,58 @@ public final class ClipboardKeyboardInstrument {
         ((View) candidateView).invalidate();
     }
 
+    /* ================= 9. IME 重启（关闭再打开）时清空筛选 =================
+       筛选关键词是静态状态；输入法服务重建（SogouIME.onCreate）后旧筛选
+       不应残留 —— 关闭再打开应恢复全量。hook 基类 SogouIME（xiaomi.SogouIME
+       为空子类）的 onCreate，after 清空关键词并复位搜索模式。
+       注意：搜索流程只切页面（reopenClipboardPage）不重建 IME，不受影响 */
+    private static void hookImeRestart(ClassLoader cl) {
+        try {
+            XposedHelpers.findAndHookMethod("com.sohu.inputmethod.sogou.SogouIME", cl, "onCreate",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            try {
+                                sSearchMode = false;
+                                ListFilterProxy.clearKeyword();
+                                XposedBridge.log("[ClipboardEnhance] IME recreated, filter cleared");
+                            } catch (Throwable t) {
+                                XposedBridge.log("[ClipboardEnhance] ime onCreate error: " + t);
+                            }
+                        }
+                    });
+            XposedBridge.log("[ClipboardEnhance] ime-restart hook installed");
+        } catch (Throwable t) {
+            XposedBridge.log("[ClipboardEnhance] hook SogouIME.onCreate failed: " + t);
+        }
+    }
+
     /* ================= 模块动作 ================= */
+
+    /**
+     * 触摸去抖：同一点（±30px）TOUCH_DEBOUNCE_MS 内的重复事件（DOWN/UP 序列）
+     * 返回 false，只允许第一次命中执行动作，后续事件仅屏蔽不执行。
+     */
+    private static boolean debounceTouch(float x, float y) {
+        long now = SystemClock.uptimeMillis();
+        if (now - sLastTouchTime < TOUCH_DEBOUNCE_MS
+                && Math.abs(x - sLastTouchX) < 30f
+                && Math.abs(y - sLastTouchY) < 30f) {
+            return false;
+        }
+        sLastTouchTime = now;
+        sLastTouchX = x;
+        sLastTouchY = y;
+        return true;
+    }
+
+    /** 清除筛选：恢复全量列表（按钮「全部」） */
+    private static void onClearFilter() {
+        XposedBridge.log("[ClipboardEnhance] clear filter");
+        sSearchMode = false;
+        ListFilterProxy.clearKeyword();
+        swapList();
+    }
 
     /** 🔍搜索：进入搜索模式 → 收起面板（露出主键盘拼音输入） */
     private static void onSearchClick() {
