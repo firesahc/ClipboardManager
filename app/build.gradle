@@ -40,4 +40,7 @@ android {
 dependencies {
     // Xposed API：仅编译期引用，运行时由 LSPosed 提供
     compileOnly files("${rootProject.projectDir}/libs/xposed-api-89.jar")
+
+    // 单元测试
+    testImplementation 'junit:junit:4.13.2'
 }

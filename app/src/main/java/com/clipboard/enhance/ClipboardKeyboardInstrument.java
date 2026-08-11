@@ -58,6 +58,29 @@ public final class ClipboardKeyboardInstrument {
     /** 数据库门面 → session → dao 链：db.a.b().a().a() */
     private static final String CLS_DB_A = "com.sohu.inputmethod.clipboard.db.a";
 
+    /* ================= 日志 ================= */
+    /** 统一日志前缀：LSPosed 日志面板按前缀过滤 */
+    private static final String LOG_TAG = "[ClipboardEnhance] ";
+
+    /* ================= 常量 ================= */
+    /** touchInButton 未命中返回值（原生命中 MIN_VALUE），模块按钮拦截复用同值屏蔽 */
+    private static final int HIT_SUPPRESSED = Integer.MIN_VALUE;
+    /** 触摸去抖：同一点 ±TOUCH_DEBOUNCE_DIST_PX 内 TOUCH_DEBOUNCE_MS 只执行第一次动作 */
+    private static final long TOUCH_DEBOUNCE_MS = 500L;
+    private static final float TOUCH_DEBOUNCE_DIST_PX = 30f;
+    /** 模块按钮绘制：与相邻原生按钮的间距、文字内边距系数（相对字号） */
+    private static final float BTN_GAP_PX = 8f;
+    private static final float BTN_PAD_FACTOR = 0.9f;
+    private static final float FALLBACK_TEXT_SIZE_PX = 14f;
+    /** 兜底按钮色：原生 TEXT_BTN_TEXT_COLOR（灰），字段反射失败时使用 */
+    private static final int FALLBACK_BTN_COLOR = 0xFF9F9B95;
+    /** 模块按钮文案（宿主进程无应用资源，硬编码与原生 UI 语言一致） */
+    private static final String LABEL_SEARCH = "搜索";
+    private static final String LABEL_ALL = "全部";
+    private static final String LABEL_COMMIT_ALL = "输入全部";
+    /** 删除确认框文案模板（与原生 w() 文案一致，筛选态覆写时使用） */
+    private static final String DELETE_MSG_TEMPLATE = "您确定删除剪贴板%d条内容吗?";
+
     /** 模块状态 */
     private static volatile boolean sSearchMode = false;
     private static volatile Object sPage;          // ClipboardPage 实例
@@ -70,12 +93,10 @@ public final class ClipboardKeyboardInstrument {
     private static final Rect sCommitAllRect = new Rect();
     private static volatile boolean sSearchRectValid = false;
     private static volatile boolean sCommitAllRectValid = false;
-    // 触摸去抖：DOWN/UP 事件序列会连续两次命中 touchInButton，
-    // 去抖后只处理第一次（否则「全部」清除后 UP 再次命中会误触「搜索」）
+    /** 触摸去抖状态：记录上次动作的时间与坐标 */
     private static volatile long sLastTouchTime = 0L;
     private static volatile float sLastTouchX = 0f;
     private static volatile float sLastTouchY = 0f;
-    private static final long TOUCH_DEBOUNCE_MS = 500L;
 
     private ClipboardKeyboardInstrument() {
     }
@@ -95,9 +116,9 @@ public final class ClipboardKeyboardInstrument {
             hookAdapterSelectAll(cl);
             hookDeleteScope(cl);
             hookImeRestart(cl);
-            XposedBridge.log("[ClipboardEnhance] all hooks installed");
+            XposedBridge.log(LOG_TAG + "all hooks installed");
         } catch (Throwable t) {
-            XposedBridge.log("[ClipboardEnhance] init error: " + t);
+            XposedBridge.log(LOG_TAG + "init error: " + t);
         }
     }
 
@@ -112,112 +133,127 @@ public final class ClipboardKeyboardInstrument {
                                 sCandidateView = param.thisObject;
                                 drawModuleButtons((View) param.thisObject, (Canvas) param.args[0]);
                             } catch (Throwable t) {
-                                XposedBridge.log("[ClipboardEnhance] drawBase after error: " + t);
+                                XposedBridge.log(LOG_TAG + "drawBase after error: " + t);
                             }
                         }
                     });
+            XposedBridge.log(LOG_TAG + "drawBase hook installed");
         } catch (Throwable t) {
-            XposedBridge.log("[ClipboardEnhance] hook drawBase failed: " + t);
+            XposedBridge.log(LOG_TAG + "hook drawBase failed: " + t);
         }
     }
 
     private static void drawModuleButtons(View view, Canvas canvas) {
-        boolean selecting = false;
-        try {
-            Object v = XposedHelpers.callMethod(view, "isSelecting");
-            selecting = Boolean.TRUE.equals(v);
-        } catch (Throwable ignored) {
-        }
         int w = view.getWidth();
         int h = view.getHeight();
         if (w <= 0 || h <= 0) {
             return;
         }
-
-        // 复用原生画笔风格：反射取 mPaint；取不到则自建
-        Paint paint;
-        try {
-            paint = (Paint) XposedHelpers.getObjectField(view, "mPaint");
-        } catch (Throwable t) {
-            paint = new Paint();
-            paint.setAntiAlias(true);
-        }
+        Paint paint = modulePaint(view);
+        boolean selecting = isSelecting(view);
 
         if (!selecting) {
             // ---- 非整理态：「搜索/全部」画在「整理」(getmSelectingBtnRect) 左侧 ----
             // 筛选生效时按钮变「全部」，点击清除筛选恢复全量
-            boolean filtering = ListFilterProxy.getKeyword().length() > 0;
-            Rect nativeBtn;
-            try {
-                nativeBtn = (Rect) XposedHelpers.callMethod(view, "getmSelectingBtnRect");
-            } catch (Throwable t) {
-                nativeBtn = null;
-            }
+            Rect nativeBtn = nativeButtonRect(view, "getmSelectingBtnRect", null);
             if (nativeBtn == null) {
                 return;
             }
-            float gap = 8f;
-            float textSize;
-            try {
-                textSize = paint.getTextSize();
-            } catch (Throwable t) {
-                textSize = 14f;
-            }
-            String label = filtering ? "全部" : "搜索";
-            float textW = paint.measureText(label);
-            // 按钮 = 文字 + 内边距
-            float pad = textSize * 0.9f;
-            float btnW = textW + pad;
-            int left = (int) (nativeBtn.left - gap - btnW);
-            sSearchRect.set(left, 0, (int) (left + btnW), h);
+            boolean filtering = ListFilterProxy.isFiltering();
+            String label = filtering ? LABEL_ALL : LABEL_SEARCH;
+            float btnW = textButtonWidth(paint, label);
+            int left = (int) (nativeBtn.left - BTN_GAP_PX - btnW);
+            Rect hit = drawTextButton(view, canvas, paint, label, left, h, false);
+            sSearchRect.set(hit);
             sSearchRectValid = true;
-
-            // 纯文字绘制，与原生按钮风格一致，不画背景
-            float baseY = (sSearchRect.top + sSearchRect.bottom) / 2f
-                    - (paint.descent() + paint.ascent()) / 2f;
-            canvas.drawText(label, left + pad / 2f, baseY, moduleTextPaint(view, paint, false));
-
             sCommitAllRectValid = false; // 非整理态无此按钮
         } else {
             // ---- 整理态：「输入全部(N)」画在「删除」(mClearButtonWholeRect) 左侧 ----
-            Rect deleteRect;
-            try {
-                deleteRect = (Rect) XposedHelpers.getObjectField(view, "mClearButtonWholeRect");
-            } catch (Throwable t) {
-                deleteRect = null;
-            }
+            Rect deleteRect = nativeButtonRect(view, null, "mClearButtonWholeRect");
             if (deleteRect == null) {
                 return;
             }
             int count = selectedCount();
-            String label = count > 0 ? "输入全部(" + count + ")" : "输入全部";
-            float textW = paint.measureText(label);
-            float pad = paint.getTextSize() * 0.9f;
-            float btnW = textW + pad;
-            float gap = 8f;
-            int right = (int) (deleteRect.left - gap);
+            String label = count > 0 ? LABEL_COMMIT_ALL + "(" + count + ")" : LABEL_COMMIT_ALL;
+            float btnW = textButtonWidth(paint, label);
+            int right = (int) (deleteRect.left - BTN_GAP_PX);
             int left = (int) (right - btnW);
-            sCommitAllRect.set(left, 0, right, view.getHeight());
+            Rect hit = drawTextButton(view, canvas, paint, label, left, h, true);
+            sCommitAllRect.set(hit);
             sCommitAllRectValid = true;
-
-            // 纯文字绘制，与原生按钮风格一致，不画背景
-            float baseY = (sCommitAllRect.top + sCommitAllRect.bottom) / 2f
-                    - (paint.descent() + paint.ascent()) / 2f;
-            canvas.drawText(label, left + pad / 2f, baseY, moduleTextPaint(view, paint, true));
-
             sSearchRectValid = false;
         }
+    }
+
+    /** 复用原生画笔风格：反射取 mPaint；取不到则自建默认画笔 */
+    private static Paint modulePaint(View view) {
+        try {
+            return (Paint) XposedHelpers.getObjectField(view, "mPaint");
+        } catch (Throwable t) {
+            Paint p = new Paint();
+            p.setAntiAlias(true);
+            return p;
+        }
+    }
+
+    /** 是否整理态：candidateView.isSelecting()，反射失败视为非整理态 */
+    private static boolean isSelecting(View view) {
+        try {
+            return Boolean.TRUE.equals(XposedHelpers.callMethod(view, "isSelecting"));
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /** 取原生按钮矩形：优先 getter 方法，其次实例字段；取不到返回 null */
+    private static Rect nativeButtonRect(View view, String getter, String field) {
+        try {
+            return getter != null
+                    ? (Rect) XposedHelpers.callMethod(view, getter)
+                    : (Rect) XposedHelpers.getObjectField(view, field);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    /** 模块按钮字号：取原生画笔字号；异常兜底 FALLBACK_TEXT_SIZE_PX（如画笔被篡改） */
+    private static float buttonTextSize(Paint paint) {
+        try {
+            return paint.getTextSize();
+        } catch (Throwable t) {
+            return FALLBACK_TEXT_SIZE_PX;
+        }
+    }
+
+    /** 模块按钮宽度 = 文字宽 + 相对字号内边距（与原生按钮观感一致） */
+    private static float textButtonWidth(Paint paint, String label) {
+        return paint.measureText(label) + buttonTextSize(paint) * BTN_PAD_FACTOR;
+    }
+
+    /**
+     * 绘制一个模块文字按钮（纯文字，与原生按钮风格一致，不画背景），
+     * 返回其命中矩形（自上而下铺满 view 高度）。
+     */
+    private static Rect drawTextButton(View view, Canvas canvas, Paint paint, String label,
+                                       int left, int viewHeight, boolean selecting) {
+        float pad = buttonTextSize(paint) * BTN_PAD_FACTOR;
+        float width = textButtonWidth(paint, label);
+        int right = (int) (left + width);
+        float baseY = viewHeight / 2f - (paint.descent() + paint.ascent()) / 2f;
+        canvas.drawText(label, left + pad / 2f, baseY, moduleTextPaint(view, paint, selecting));
+        return new Rect(left, 0, right, viewHeight);
     }
 
     /** 模块按钮画笔：颜色采自原生按钮当前色（已含主题/暗色适配），与原生观感一致 */
     private static Paint moduleTextPaint(View view, Paint base, boolean selecting) {
         Paint p = new Paint(base);
         p.setStyle(Paint.Style.FILL);
-        int color = 0xFF9F9B95; // 兜底：原生 TEXT_BTN_TEXT_COLOR（灰）
+        int color = FALLBACK_BTN_COLOR; // 原生 TEXT_BTN_TEXT_COLOR（灰）
         try {
             // 原生颜色字段：非整理态「整理」= mSelectingBtnColor，整理态「全选」= mSelectingAllTextColor
             color = XposedHelpers.getIntField(view, selecting ? "mSelectingAllTextColor" : "mSelectingBtnColor");
         } catch (Throwable ignored) {
+            // 反射取色失败（字段改名/版本差异）→ 保持 FALLBACK_BTN_COLOR，按钮仍可用
         }
         p.setColor(color);
         return p;
@@ -225,19 +261,31 @@ public final class ClipboardKeyboardInstrument {
 
     /** 当前勾选数：keyboard.adapter(N=b) → g() 勾选列表 size */
     private static int selectedCount() {
+        List<?> checked = checkedList();
+        return checked == null ? 0 : checked.size();
+    }
+
+    /** 当前勾选列表：keyboard.adapter(N=b) → g()；任一步失败返回 null */
+    private static List<?> checkedList() {
         try {
-            Object kb = sKeyboard;
-            if (kb == null) {
-                return 0;
-            }
-            Object adapter = XposedHelpers.getObjectField(kb, "N");
+            Object adapter = clipboardAdapter();
             if (adapter == null) {
-                return 0;
+                return null;
             }
             Object list = XposedHelpers.callMethod(adapter, "g");
-            return list instanceof List ? ((List<?>) list).size() : 0;
+            return list instanceof List ? (List<?>) list : null;
         } catch (Throwable t) {
-            return 0;
+            return null;
+        }
+    }
+
+    /** 剪贴板适配器实例：keyboard 字段 N（b 类）；无 keyboard 返回 null */
+    private static Object clipboardAdapter() {
+        try {
+            Object kb = sKeyboard;
+            return kb == null ? null : XposedHelpers.getObjectField(kb, "N");
+        } catch (Throwable t) {
+            return null;
         }
     }
 
@@ -250,36 +298,36 @@ public final class ClipboardKeyboardInstrument {
                         protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                             try {
                                 View view = (View) param.thisObject;
-                                boolean selecting = Boolean.TRUE.equals(
-                                        XposedHelpers.callMethod(view, "isSelecting"));
-                                float x = (Float) param.args[0];
-                                float y = (Float) param.args[1];
-                                if (!selecting && sSearchRectValid && sSearchRect.contains((int) x, (int) y)) {
+                                boolean selecting = isSelecting(view);
+                                int x = Math.round((Float) param.args[0]);
+                                int y = Math.round((Float) param.args[1]);
+                                if (!selecting && sSearchRectValid && sSearchRect.contains(x, y)) {
                                     // 去抖：DOWN/UP 事件序列会连续两次命中，只执行第一次
                                     if (debounceTouch(x, y)) {
                                         // 筛选生效中 → 清除筛选（「全部」）；否则进入搜索模式
-                                        if (ListFilterProxy.getKeyword().length() > 0) {
+                                        if (ListFilterProxy.isFiltering()) {
                                             onClearFilter();
                                         } else {
                                             onSearchClick();
                                         }
                                     }
-                                    param.setResult(Integer.MIN_VALUE); // 屏蔽原生命中
+                                    param.setResult(HIT_SUPPRESSED); // 屏蔽原生命中
                                     return;
                                 }
-                                if (selecting && sCommitAllRectValid && sCommitAllRect.contains((int) x, (int) y)) {
+                                if (selecting && sCommitAllRectValid && sCommitAllRect.contains(x, y)) {
                                     if (debounceTouch(x, y)) {
                                         onCommitAllClick();
                                     }
-                                    param.setResult(Integer.MIN_VALUE);
+                                    param.setResult(HIT_SUPPRESSED);
                                 }
                             } catch (Throwable t) {
-                                XposedBridge.log("[ClipboardEnhance] touchInButton error: " + t);
+                                XposedBridge.log(LOG_TAG + "touchInButton error: " + t);
                             }
                         }
                     });
+            XposedBridge.log(LOG_TAG + "touchInButton hook installed");
         } catch (Throwable t) {
-            XposedBridge.log("[ClipboardEnhance] hook touchInButton failed: " + t);
+            XposedBridge.log(LOG_TAG + "hook touchInButton failed: " + t);
         }
     }
 
@@ -297,41 +345,57 @@ public final class ClipboardKeyboardInstrument {
                                 ListFilterProxy.onListChanged(full);
                                 swapList();
                             } catch (Throwable t) {
-                                XposedBridge.log("[ClipboardEnhance] onChanged error: " + t);
+                                XposedBridge.log(LOG_TAG + "onChanged error: " + t);
                             }
                         }
                     });
+            XposedBridge.log(LOG_TAG + "onChanged hook installed");
         } catch (Throwable t) {
-            XposedBridge.log("[ClipboardEnhance] hook C(List) failed: " + t);
+            XposedBridge.log(LOG_TAG + "hook C(List) failed: " + t);
         }
     }
 
     /** 将过滤结果写回 M 字段 + adapter.j，并尝试刷新 */
     private static void swapList() {
         try {
-            Object kb = sKeyboard;
-            if (kb == null) {
-                return;
-            }
             List<Object> active = ListFilterProxy.activeList();
-            XposedHelpers.setObjectField(kb, "M", active);
-            try {
-                Object adapter = XposedHelpers.getObjectField(kb, "N");
-                if (adapter != null) {
-                    XposedHelpers.setObjectField(adapter, "j", active);
-                    try {
-                        XposedHelpers.callMethod(adapter, "notifyDataSetChanged");
-                    } catch (Throwable ignored) {
-                        // adapter 可能无此方法；原生会用内部机制刷新
-                    }
-                }
-            } catch (Throwable ignored) {
-            }
+            writeBackKeyboard(active);
+            writeBackAdapter(active);
         } catch (Throwable t) {
-            XposedBridge.log("[ClipboardEnhance] swapList error: " + t);
+            XposedBridge.log(LOG_TAG + "swapList error: " + t);
         }
         // 过滤/恢复后同步刷新标题旁数字（当前显示/总数）
         refreshCountText(null);
+    }
+
+    /** 把生效列表写回 keyboard 数据源字段 M（索引上屏 a(int) 依赖它） */
+    private static void writeBackKeyboard(List<Object> active) {
+        try {
+            Object kb = sKeyboard;
+            if (kb != null) {
+                XposedHelpers.setObjectField(kb, "M", active);
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(LOG_TAG + "writeBack M failed: " + t);
+        }
+    }
+
+    /** 把生效列表写回 adapter 显示列表 j，并试探刷新（适配器无该方法则跳过） */
+    private static void writeBackAdapter(List<Object> active) {
+        try {
+            Object adapter = clipboardAdapter();
+            if (adapter == null) {
+                return;
+            }
+            XposedHelpers.setObjectField(adapter, "j", active);
+            try {
+                XposedHelpers.callMethod(adapter, "notifyDataSetChanged");
+            } catch (Throwable ignored) {
+                XposedBridge.log(LOG_TAG + "adapter has no notifyDataSetChanged; native refresh fallback");
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(LOG_TAG + "writeBack adapter.j failed: " + t);
+        }
     }
 
     /* ================= 4a. 剪贴板条目上屏：兜底复位搜索模式 =================
@@ -345,12 +409,13 @@ public final class ClipboardKeyboardInstrument {
                         protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                             if (sSearchMode) {
                                 sSearchMode = false;
-                                XposedBridge.log("[ClipboardEnhance] item click -> exit search mode");
+                                XposedBridge.log(LOG_TAG + "item click -> exit search mode");
                             }
                         }
                     });
+            XposedBridge.log(LOG_TAG + "item click hook installed");
         } catch (Throwable t) {
-            XposedBridge.log("[ClipboardEnhance] hook item failed: " + t);
+            XposedBridge.log(LOG_TAG + "hook item failed: " + t);
         }
     }
 
@@ -375,17 +440,18 @@ public final class ClipboardKeyboardInstrument {
                                 // 搜索模式：拦截为关键词，不真正上屏
                                 sSearchMode = false;
                                 param.setResult(null);
-                                XposedBridge.log("[ClipboardEnhance] pickSuggestion(\"" + keyword + "\") intercepted -> keyword");
+                                XposedBridge.log(LOG_TAG + "pickSuggestion(\"" + keyword + "\") intercepted -> keyword");
                                 ListFilterProxy.setKeyword(keyword);
                                 reopenClipboardPage();
                                 swapList();
                             } catch (Throwable t) {
-                                XposedBridge.log("[ClipboardEnhance] pickSuggestion error: " + t);
+                                XposedBridge.log(LOG_TAG + "pickSuggestion error: " + t);
                             }
                         }
                     });
+            XposedBridge.log(LOG_TAG + "pickSuggestion hook installed");
         } catch (Throwable t) {
-            XposedBridge.log("[ClipboardEnhance] hook pickSuggestion failed: " + t);
+            XposedBridge.log(LOG_TAG + "hook pickSuggestion failed: " + t);
         }
     }
 
@@ -401,8 +467,9 @@ public final class ClipboardKeyboardInstrument {
                             sPage = param.thisObject;
                         }
                     });
+            XposedBridge.log(LOG_TAG + "page create hook installed");
         } catch (Throwable t) {
-            XposedBridge.log("[ClipboardEnhance] hook page.M failed: " + t);
+            XposedBridge.log(LOG_TAG + "hook page.M failed: " + t);
         }
     }
 
@@ -436,7 +503,7 @@ public final class ClipboardKeyboardInstrument {
                                     sOldestBackup = all.get(0);
                                 }
                             } catch (Throwable t) {
-                                XposedBridge.log("[ClipboardEnhance] backup oldest failed: " + t);
+                                XposedBridge.log(LOG_TAG + "backup oldest failed: " + t);
                             }
                         }
 
@@ -453,13 +520,13 @@ public final class ClipboardKeyboardInstrument {
                                     XposedHelpers.callMethod(dao, "insertOrReplace", backup);
                                 }
                             } catch (Throwable t) {
-                                XposedBridge.log("[ClipboardEnhance] restore oldest failed: " + t);
+                                XposedBridge.log(LOG_TAG + "restore oldest failed: " + t);
                             }
                         }
                     });
-            XposedBridge.log("[ClipboardEnhance] 150-limit bypass installed");
+            XposedBridge.log(LOG_TAG + "150-limit bypass installed");
         } catch (Throwable t) {
-            XposedBridge.log("[ClipboardEnhance] hook p.H failed: " + t);
+            XposedBridge.log(LOG_TAG + "hook p.H failed: " + t);
         }
     }
 
@@ -477,7 +544,8 @@ public final class ClipboardKeyboardInstrument {
 
     /* ================= 7. 标题数字 → 「当前显示数量/当前总数量」 =================
        原生 setClipboardCount(i,i2)：mCountText = String.format(getString(clipboard_count_text), i)
-       after 覆写 mCountText：保留原生格式串（如 "(%d)" → "5/20"），数字为 显示数/总数 */
+       格式串内写死了上限 150（如 "(%d/150)"）。此处 after 覆写 mCountText 为纯数字
+       「当前显示数/当前总数」（见 refreshCountText），数字实时反映过滤结果 */
     private static void hookCandidateCount(ClassLoader cl) {
         try {
             XposedHelpers.findAndHookMethod(CLS_CANDIDATE, cl, "setClipboardCount", int.class, int.class,
@@ -487,13 +555,13 @@ public final class ClipboardKeyboardInstrument {
                             try {
                                 refreshCountText(param.thisObject);
                             } catch (Throwable t) {
-                                XposedBridge.log("[ClipboardEnhance] setClipboardCount error: " + t);
+                                XposedBridge.log(LOG_TAG + "setClipboardCount error: " + t);
                             }
                         }
                     });
-            XposedBridge.log("[ClipboardEnhance] count text hook installed");
+            XposedBridge.log(LOG_TAG + "count text hook installed");
         } catch (Throwable t) {
-            XposedBridge.log("[ClipboardEnhance] hook setClipboardCount failed: " + t);
+            XposedBridge.log(LOG_TAG + "hook setClipboardCount failed: " + t);
         }
     }
 
@@ -518,13 +586,13 @@ public final class ClipboardKeyboardInstrument {
                                     XposedHelpers.setObjectField(param.thisObject, "j", active);
                                 }
                             } catch (Throwable t) {
-                                XposedBridge.log("[ClipboardEnhance] select-all scope error: " + t);
+                                XposedBridge.log(LOG_TAG + "select-all scope error: " + t);
                             }
                         }
                     });
-            XposedBridge.log("[ClipboardEnhance] select-all scope hook installed");
+            XposedBridge.log(LOG_TAG + "select-all scope hook installed");
         } catch (Throwable t) {
-            XposedBridge.log("[ClipboardEnhance] hook adapter.l failed: " + t);
+            XposedBridge.log(LOG_TAG + "hook adapter.l failed: " + t);
         }
     }
 
@@ -569,26 +637,26 @@ public final class ClipboardKeyboardInstrument {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                             try {
-                                if (ListFilterProxy.getKeyword().length() > 0) {
+                                if (ListFilterProxy.isFiltering()) {
                                     // 原生文案分支取决于 list.size()==M.size()，筛选态恒相等；
                                     // 直接覆写确认框文案为「删除N条」
                                     Object dialog = XposedHelpers.getObjectField(param.thisObject, "Q");
                                     if (dialog != null) {
                                         @SuppressWarnings("unchecked")
                                         List<Object> checked = (List<Object>) param.args[0];
-                                        String msg = "您确定删除剪贴板" + checked.size() + "条内容吗?";
+                                        String msg = String.format(DELETE_MSG_TEMPLATE, checked.size());
                                         XposedHelpers.callMethod(dialog, "setMessage", (Object) msg);
-                                        XposedBridge.log("[ClipboardEnhance] delete dialog msg: " + msg);
+                                        XposedBridge.log(LOG_TAG + "delete dialog msg: " + msg);
                                     }
                                 }
                             } catch (Throwable t) {
-                                XposedBridge.log("[ClipboardEnhance] delete dialog msg error: " + t);
+                                XposedBridge.log(LOG_TAG + "delete dialog msg error: " + t);
                             }
                         }
                     });
-            XposedBridge.log("[ClipboardEnhance] delete dialog hook installed");
+            XposedBridge.log(LOG_TAG + "delete dialog hook installed");
         } catch (Throwable t) {
-            XposedBridge.log("[ClipboardEnhance] hook Keyboard.w failed: " + t);
+            XposedBridge.log(LOG_TAG + "hook Keyboard.w failed: " + t);
         }
         try {
             XposedHelpers.findAndHookMethod(CLS_VIEW_MODEL, cl, "e",
@@ -596,29 +664,25 @@ public final class ClipboardKeyboardInstrument {
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                             try {
-                                if (ListFilterProxy.getKeyword().length() > 0) {
+                                if (ListFilterProxy.isFiltering()) {
                                     // 取当前勾选集（此刻全选勾选尚未清除）
-                                    Object kb = sKeyboard;
-                                    if (kb != null) {
-                                        Object adapter = XposedHelpers.getObjectField(kb, "N");
-                                        Object list = adapter == null ? null : XposedHelpers.callMethod(adapter, "g");
-                                        if (list instanceof List && !((List<?>) list).isEmpty()) {
-                                            // 屏蔽清空全部，重定向为只删勾选集
-                                            param.setResult(null);
-                                            XposedHelpers.callMethod(param.thisObject, "g", list);
-                                            XposedBridge.log("[ClipboardEnhance] clear-all rerouted to checked-only ("
-                                                    + ((List<?>) list).size() + ")");
-                                        }
+                                    List<?> list = checkedList();
+                                    if (list != null && !list.isEmpty()) {
+                                        // 屏蔽清空全部，重定向为只删勾选集
+                                        param.setResult(null);
+                                        XposedHelpers.callMethod(param.thisObject, "g", list);
+                                        XposedBridge.log(LOG_TAG + "clear-all rerouted to checked-only ("
+                                                + list.size() + ")");
                                     }
                                 }
                             } catch (Throwable t) {
-                                XposedBridge.log("[ClipboardEnhance] delete scope error: " + t);
+                                XposedBridge.log(LOG_TAG + "delete scope error: " + t);
                             }
                         }
                     });
-            XposedBridge.log("[ClipboardEnhance] delete-scope hook installed");
+            XposedBridge.log(LOG_TAG + "delete-scope hook installed");
         } catch (Throwable t) {
-            XposedBridge.log("[ClipboardEnhance] hook ViewModel.e failed: " + t);
+            XposedBridge.log(LOG_TAG + "hook ViewModel.e failed: " + t);
         }
     }
 
@@ -636,29 +700,29 @@ public final class ClipboardKeyboardInstrument {
                             try {
                                 sSearchMode = false;
                                 ListFilterProxy.clearKeyword();
-                                XposedBridge.log("[ClipboardEnhance] IME recreated, filter cleared");
+                                XposedBridge.log(LOG_TAG + "IME recreated, filter cleared");
                             } catch (Throwable t) {
-                                XposedBridge.log("[ClipboardEnhance] ime onCreate error: " + t);
+                                XposedBridge.log(LOG_TAG + "ime onCreate error: " + t);
                             }
                         }
                     });
-            XposedBridge.log("[ClipboardEnhance] ime-restart hook installed");
+            XposedBridge.log(LOG_TAG + "ime-restart hook installed");
         } catch (Throwable t) {
-            XposedBridge.log("[ClipboardEnhance] hook SogouIME.onCreate failed: " + t);
+            XposedBridge.log(LOG_TAG + "hook SogouIME.onCreate failed: " + t);
         }
     }
 
     /* ================= 模块动作 ================= */
 
     /**
-     * 触摸去抖：同一点（±30px）TOUCH_DEBOUNCE_MS 内的重复事件（DOWN/UP 序列）
-     * 返回 false，只允许第一次命中执行动作，后续事件仅屏蔽不执行。
+     * 触摸去抖：同一点（±TOUCH_DEBOUNCE_DIST_PX）TOUCH_DEBOUNCE_MS 内的重复事件
+     * （DOWN/UP 序列）返回 false，只允许第一次命中执行动作，后续事件仅屏蔽不执行。
      */
     private static boolean debounceTouch(float x, float y) {
         long now = SystemClock.uptimeMillis();
         if (now - sLastTouchTime < TOUCH_DEBOUNCE_MS
-                && Math.abs(x - sLastTouchX) < 30f
-                && Math.abs(y - sLastTouchY) < 30f) {
+                && Math.abs(x - sLastTouchX) < TOUCH_DEBOUNCE_DIST_PX
+                && Math.abs(y - sLastTouchY) < TOUCH_DEBOUNCE_DIST_PX) {
             return false;
         }
         sLastTouchTime = now;
@@ -669,7 +733,7 @@ public final class ClipboardKeyboardInstrument {
 
     /** 清除筛选：恢复全量列表（按钮「全部」） */
     private static void onClearFilter() {
-        XposedBridge.log("[ClipboardEnhance] clear filter");
+        XposedBridge.log(LOG_TAG + "clear filter");
         sSearchMode = false;
         ListFilterProxy.clearKeyword();
         swapList();
@@ -678,7 +742,7 @@ public final class ClipboardKeyboardInstrument {
     /** 🔍搜索：进入搜索模式 → 收起面板（露出主键盘拼音输入） */
     private static void onSearchClick() {
         sSearchMode = true;
-        XposedBridge.log("[ClipboardEnhance] 🔍 enter search mode");
+        XposedBridge.log(LOG_TAG + "🔍 enter search mode");
         // 收起剪贴板面板回主键盘（原版行为 w() 私有 → 反射调用）
         try {
             Object page = sPage;
@@ -686,7 +750,7 @@ public final class ClipboardKeyboardInstrument {
                 XposedHelpers.callMethod(page, "w");
             }
         } catch (Throwable t) {
-            XposedBridge.log("[ClipboardEnhance] collapse panel error: " + t);
+            XposedBridge.log(LOG_TAG + "collapse panel error: " + t);
         }
         // 清空旧关键词，列表恢复
         ListFilterProxy.clearKeyword();
@@ -696,20 +760,12 @@ public final class ClipboardKeyboardInstrument {
     /** 输入全部：勾选内容逐条上屏，保持整理态 */
     private static void onCommitAllClick() {
         try {
+            List<?> selected = checkedList();
+            if (selected == null || selected.isEmpty()) {
+                return;
+            }
             Object kb = sKeyboard;
             if (kb == null) {
-                return;
-            }
-            Object adapter = XposedHelpers.getObjectField(kb, "N");
-            if (adapter == null) {
-                return;
-            }
-            Object list = XposedHelpers.callMethod(adapter, "g");
-            if (!(list instanceof List)) {
-                return;
-            }
-            List<?> selected = (List<?>) list;
-            if (selected.isEmpty()) {
                 return;
             }
             // 逐条上屏：u.Z().A(item.d)；保持整理态不退出
@@ -724,10 +780,10 @@ public final class ClipboardKeyboardInstrument {
                 XposedHelpers.callMethod(commit, "A", String.valueOf(text));
                 n++;
             }
-            XposedBridge.log("[ClipboardEnhance] committed " + n + " items, stay in manage mode");
+            XposedBridge.log(LOG_TAG + "committed " + n + " items, stay in manage mode");
             // 保持整理态：不退出；按钮计数由下一次 drawBase 自动刷新
         } catch (Throwable t) {
-            XposedBridge.log("[ClipboardEnhance] commitAll error: " + t);
+            XposedBridge.log(LOG_TAG + "commitAll error: " + t);
         }
     }
 
@@ -738,7 +794,7 @@ public final class ClipboardKeyboardInstrument {
             XposedHelpers.callStaticMethod(base, "F",
                     "/app/ClipboardPage", (Object) null);
         } catch (Throwable t) {
-            XposedBridge.log("[ClipboardEnhance] reopen page failed (manual reopen ok): " + t);
+            XposedBridge.log(LOG_TAG + "reopen page failed (manual reopen ok): " + t);
         }
     }
 

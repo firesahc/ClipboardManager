@@ -42,6 +42,11 @@ public final class ListFilterProxy {
         return sKeyword;
     }
 
+    /** 是否处于筛选态（关键词非空） */
+    public static boolean isFiltering() {
+        return sKeyword.length() > 0;
+    }
+
     /** 设置关键词并立即重算；空串/空白 → 恢复全量 */
     public static void setKeyword(String kw) {
         sKeyword = kw == null ? "" : kw.trim();
