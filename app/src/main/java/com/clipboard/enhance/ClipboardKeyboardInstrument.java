@@ -116,6 +116,7 @@ public final class ClipboardKeyboardInstrument {
             hookAdapterSelectAll(cl);
             hookDeleteScope(cl);
             hookImeRestart(cl);
+            SogouSettingsInjector.init(cl);
             XposedBridge.log(LOG_TAG + "all hooks installed");
         } catch (Throwable t) {
             XposedBridge.log(LOG_TAG + "init error: " + t);
@@ -398,18 +399,48 @@ public final class ClipboardKeyboardInstrument {
         }
     }
 
-    /* ================= 4a. 剪贴板条目上屏：兜底复位搜索模式 =================
+    /* ================= 4a. 剪贴板条目上屏：兜底复位搜索模式 + 记录置顶 =================
        剪贴板上屏路径 a(int) → u.Z().A(...)，不走拼音候选；
-       若搜索模式残留，点击条目时在此复位，防止误拦截 */
+       若搜索模式残留，点击条目时在此复位，防止误拦截。
+       after 记录本次上屏条目到 ListFilterProxy（置顶功能：输入过的排最上方），
+       并触发 swapList 立即重排列表。 */
     private static void hookKeyboardItem(ClassLoader cl) {
         try {
             XposedHelpers.findAndHookMethod(CLS_KEYBOARD, cl, "a", int.class,
                     new XC_MethodHook() {
+                        private volatile Object sLastCommitted;
+
                         @Override
                         protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            sLastCommitted = null;
                             if (sSearchMode) {
                                 sSearchMode = false;
                                 XposedBridge.log(LOG_TAG + "item click -> exit search mode");
+                            }
+                            try {
+                                List<?> items = (List<?>) XposedHelpers.getObjectField(param.thisObject, "M");
+                                int index = (Integer) param.args[0];
+                                if (items != null && index >= 0 && index < items.size()) {
+                                    sLastCommitted = items.get(index);
+                                }
+                            } catch (Throwable t) {
+                                XposedBridge.log(LOG_TAG + "item record error: " + t);
+                            }
+                        }
+
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            Object committed = sLastCommitted;
+                            sLastCommitted = null;
+                            if (committed == null) {
+                                return;
+                            }
+                            try {
+                                ListFilterProxy.markInput(committed);
+                                XposedBridge.log(LOG_TAG + "item committed -> pin to top");
+                                swapList();
+                            } catch (Throwable t) {
+                                XposedBridge.log(LOG_TAG + "pin-after-commit error: " + t);
                             }
                         }
                     });
@@ -690,6 +721,7 @@ public final class ClipboardKeyboardInstrument {
        筛选关键词是静态状态；输入法服务重建（SogouIME.onCreate）后旧筛选
        不应残留 —— 关闭再打开应恢复全量。hook 基类 SogouIME（xiaomi.SogouIME
        为空子类）的 onCreate，after 清空关键词并复位搜索模式。
+       同时恢复置顶开关的持久化状态（进程冷启动后 SharedPreferences 值）。
        注意：搜索流程只切页面（reopenClipboardPage）不重建 IME，不受影响 */
     private static void hookImeRestart(ClassLoader cl) {
         try {
@@ -700,6 +732,8 @@ public final class ClipboardKeyboardInstrument {
                             try {
                                 sSearchMode = false;
                                 ListFilterProxy.clearKeyword();
+                                ListFilterProxy.clearRecentInput();
+                                SogouSettingsInjector.restorePinRecentSetting();
                                 XposedBridge.log(LOG_TAG + "IME recreated, filter cleared");
                             } catch (Throwable t) {
                                 XposedBridge.log(LOG_TAG + "ime onCreate error: " + t);
