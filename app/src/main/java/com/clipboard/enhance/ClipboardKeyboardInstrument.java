@@ -116,6 +116,7 @@ public final class ClipboardKeyboardInstrument {
             hookAdapterSelectAll(cl);
             hookDeleteScope(cl);
             hookImeRestart(cl);
+            hookExitSelecting(cl);
             SogouSettingsInjector.init(cl);
             XposedBridge.log(LOG_TAG + "all hooks installed");
         } catch (Throwable t) {
@@ -164,6 +165,10 @@ public final class ClipboardKeyboardInstrument {
             String label = filtering ? LABEL_ALL : LABEL_SEARCH;
             float btnW = textButtonWidth(paint, label);
             int left = (int) (nativeBtn.left - BTN_GAP_PX - btnW);
+            if (overlapsNative(nativeBtn, left, btnW)) {
+                sSearchRectValid = false; // 位置异常：宁可隐藏按钮也不与原生文字重叠
+                return;
+            }
             Rect hit = drawTextButton(view, canvas, paint, label, left, h, false);
             sSearchRect.set(hit);
             sSearchRectValid = true;
@@ -179,11 +184,33 @@ public final class ClipboardKeyboardInstrument {
             float btnW = textButtonWidth(paint, label);
             int right = (int) (deleteRect.left - BTN_GAP_PX);
             int left = (int) (right - btnW);
+            // 防御：删除按钮锚定 mMarginRect.right、全选/取消锚定 mMarginRect.left，
+            // 确认框弹出/关闭若触发 IME 布局变化，二者漂移不同步会导致模块按钮与原生文字重叠。
+            // 重叠时跳过绘制并失效命中（按钮消失优先于文字重叠），并输出诊断日志定位根因。
+            Rect allBtn = nativeButtonRect(view, null, "mAllBtnRect");
+            Rect finishBtn = nativeButtonRect(view, null, "mFinishBtnRect");
+            if (overlapsNative(allBtn, left, btnW) || overlapsNative(finishBtn, left, btnW)) {
+                sCommitAllRectValid = false;
+                return;
+            }
             Rect hit = drawTextButton(view, canvas, paint, label, left, h, true);
             sCommitAllRect.set(hit);
             sCommitAllRectValid = true;
             sSearchRectValid = false;
         }
+    }
+
+    /**
+     * 模块按钮与原生按钮矩形是否重叠（严格区间相交，不含间距容差）。
+     * 正常布局模块按钮与原生按钮间距恰为 BTN_GAP_PX，若带容差会把正常间距误判为重叠。
+     * 原生矩形为 null 时不视为重叠（保持原行为，不误伤）。
+     */
+    private static boolean overlapsNative(Rect nativeRect, int btnLeft, float btnWidth) {
+        if (nativeRect == null) {
+            return false;
+        }
+        int btnRight = (int) (btnLeft + btnWidth);
+        return btnRight > nativeRect.left && btnLeft < nativeRect.right;
     }
 
     /** 复用原生画笔风格：反射取 mPaint；取不到则自建默认画笔 */
@@ -585,6 +612,14 @@ public final class ClipboardKeyboardInstrument {
                         protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                             try {
                                 refreshCountText(param.thisObject);
+                                // 原生缺陷修复：删除后列表变空时 setClipboardCount 会因 mCount<=0
+                                // 调用 setDrawTitle(true) 恢复标题/计数绘制，但不会退出整理态，
+                                // 导致「标题+计数」与「全选」重叠。此处主动退出整理态。
+                                int count = (Integer) param.args[0];
+                                if (count <= 0 && isSelecting((View) param.thisObject)) {
+                                    XposedHelpers.callMethod(param.thisObject, "setSelecting", false);
+                                    XposedBridge.log(LOG_TAG + "auto exit selecting: list empty after delete");
+                                }
                             } catch (Throwable t) {
                                 XposedBridge.log(LOG_TAG + "setClipboardCount error: " + t);
                             }
@@ -743,6 +778,39 @@ public final class ClipboardKeyboardInstrument {
             XposedBridge.log(LOG_TAG + "ime-restart hook installed");
         } catch (Throwable t) {
             XposedBridge.log(LOG_TAG + "hook SogouIME.onCreate failed: " + t);
+        }
+    }
+
+    /* ================= 11. 取消按钮强制退出整理态 =================
+       原生退出链路「onMenuClick(13) → setDrawTitle(true) + a(2) → Page.L(2) →
+       f.l() → keyboard.o() + n(v())」中，n(v()) 依赖 adapter.h()（勾选状态字段 o）：
+       删除后勾选集合异步刷新期间 h() 仍为 true → v()=true → n(true) 保持整理态，
+       导致「点取消无反应」且标题已恢复（setDrawTitle(true)）与「全选」文字重叠。
+       取消按钮语义明确为退出整理态，此处 after 检测原生退出失败时强制退出。 */
+    private static void hookExitSelecting(ClassLoader cl) {
+        try {
+            XposedHelpers.findAndHookMethod(CLS_CANDIDATE, cl, "onMenuClick", int.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            try {
+                                int id = (Integer) param.args[0];
+                                if (id != 13) {
+                                    return;
+                                }
+                                Object cv = param.thisObject;
+                                if (Boolean.TRUE.equals(XposedHelpers.callMethod(cv, "isSelecting"))) {
+                                    XposedHelpers.callMethod(cv, "setSelecting", false);
+                                    XposedBridge.log(LOG_TAG + "cancel: native exit missed, forced setSelecting(false)");
+                                }
+                            } catch (Throwable t) {
+                                XposedBridge.log(LOG_TAG + "onMenuClick after err: " + t);
+                            }
+                        }
+                    });
+            XposedBridge.log(LOG_TAG + "cancel-exit hook installed");
+        } catch (Throwable t) {
+            XposedBridge.log(LOG_TAG + "hook onMenuClick failed: " + t);
         }
     }
 
