@@ -399,10 +399,10 @@ public final class ClipboardKeyboardInstrument {
         }
     }
 
-    /* ================= 4a. 剪贴板条目上屏：兜底复位搜索模式 + 记录置顶 =================
+    /* ================= 4a. 剪贴板条目粘贴上屏：兜底复位搜索模式 + 记录置顶 =================
        剪贴板上屏路径 a(int) → u.Z().A(...)，不走拼音候选；
        若搜索模式残留，点击条目时在此复位，防止误拦截。
-       after 记录本次上屏条目到 ListFilterProxy（置顶功能：输入过的排最上方），
+       after 记录本次粘贴条目到 ListFilterProxy（置顶功能：粘贴过的排最上方），
        并触发 swapList 立即重排列表。 */
     private static void hookKeyboardItem(ClassLoader cl) {
         try {

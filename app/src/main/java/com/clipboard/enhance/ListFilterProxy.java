@@ -15,7 +15,7 @@ import java.util.List;
  */
 public final class ListFilterProxy {
 
-    /** 置顶列表容量：最多保留最近输入过的 N 条 */
+    /** 置顶列表容量：最多保留最近粘贴过的 N 条 */
     private static final int RECENT_CAPACITY = 20;
 
     /** 最近一次全量列表（onChanged 上报） */
@@ -26,9 +26,9 @@ public final class ListFilterProxy {
     private static volatile String sKeyword = "";
     /** 过滤源监听（Instrument 设置，用于写回后通知刷新） */
     private static volatile Runnable sOnSwap;
-    /** 置顶开关：输入过的条目排到列表最上方（默认开启，设置页可关闭） */
+    /** 置顶开关：粘贴过的条目排到列表最上方（默认开启，设置页可关闭） */
     private static volatile boolean sPinRecentEnabled = true;
-    /** 最近输入过的条目（LRU，索引 0 为最近一次输入；按对象引用去重） */
+    /** 最近粘贴过的条目（LRU，索引 0 为最近一次粘贴；按对象引用去重） */
     private static final java.util.List<Object> sRecentInput = new java.util.ArrayList<>();
 
     private ListFilterProxy() {
@@ -45,7 +45,7 @@ public final class ListFilterProxy {
         applyFilter();
     }
 
-    /* ================= 置顶功能（输入过的条目排最上方） ================= */
+    /* ================= 置顶功能（粘贴过的条目排最上方） ================= */
 
     public static boolean isPinRecentEnabled() {
         return sPinRecentEnabled;
@@ -58,7 +58,7 @@ public final class ListFilterProxy {
     }
 
     /**
-     * 记录一次剪贴板上屏：条目进入置顶列表头部（LRU），并立即重算生效列表。
+     * 记录一次剪贴板粘贴上屏：条目进入置顶列表头部（LRU），并立即重算生效列表。
      * 重算会触发 sOnSwap（Instrument 的 swapList）写回键盘列表并刷新；
      * 调用方（Instrument a(int) after）无需再手动重算，显式 swapList 仅为
      * sOnSwap 未设置时的兜底，幂等无害。
@@ -145,7 +145,7 @@ public final class ListFilterProxy {
     }
 
     /**
-     * 置顶重排：开关开启时，把最近输入过的条目（LRU 顺序，最近的在最前）移动到列表头部；
+     * 置顶重排：开关开启时，把最近粘贴过的条目（LRU 顺序，最近的在最前）移动到列表头部；
      * 其余条目保持原始相对顺序。关闭或记录为空时原样返回（不复制，保持引用同一性，
      * 与「未过滤时 activeList()==original」的既有约定兼容）。
      */

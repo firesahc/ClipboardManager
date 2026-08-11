@@ -49,6 +49,8 @@ public final class SogouSettingsInjector {
     private static final String CLS_MAIN_FRAGMENT = "com.sohu.inputmethod.settings.preference.SogouPreferenceSettingsFragment";
     private static final String CLS_MAIN_ACTIVITY = "com.sohu.inputmethod.sogou.SogouIMESettings";
     private static final String CLS_ACTIVITY_BASE = "com.sogou.lib.preference.AbstractSogouPreferenceActivity";
+    /** 设置基类 Activity（override onNewIntent，singleTop 复用入口） */
+    private static final String CLS_SETTING_ACTIVITY = "com.sohu.inputmethod.settings.preference.BaseSettingActivity";
     private static final String CLS_SOGOU_PREF = "com.sogou.lib.preference.SogouPreference";
     private static final String CLS_PREF_LISTENER = "androidx.preference.Preference$OnPreferenceClickListener";
     /** 宿主全局 Context 提供者（InputSettingFragment 等普遍使用） */
@@ -71,8 +73,8 @@ public final class SogouSettingsInjector {
     private static final String LABEL_ENTRY_SUMMARY = "剪贴板增强扩展功能";
     private static final String LABEL_PAGE_TITLE = "扩展设置";
     private static final String LABEL_BACK = "‹ 返回";
-    private static final String LABEL_PIN_TITLE = "输入过的项置顶";
-    private static final String LABEL_PIN_SUMMARY = "从剪贴板输入过的内容将排在列表最上方";
+    private static final String LABEL_PIN_TITLE = "粘贴后置顶";
+    private static final String LABEL_PIN_SUMMARY = "粘贴过的内容将排在列表最上方";
 
     private static volatile ClassLoader sCl;
 
@@ -167,7 +169,9 @@ public final class SogouSettingsInjector {
     private static void openExtPage(Context context) {
         try {
             Intent intent = new Intent();
-            intent.setClassName("com.sohu.inputmethod.sogou", CLS_MAIN_ACTIVITY);
+            // 包名不能写死：小米版宿主包名为 com.sohu.inputmethod.sogou.xiaomi，
+            // 标准版为 com.sohu.inputmethod.sogou，运行时取宿主包名保证组件可解析
+            intent.setClassName(context.getPackageName(), CLS_MAIN_ACTIVITY);
             intent.putExtra(EXTRA_EXT_PAGE, true);
             if (!(context instanceof Activity)) {
                 intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
@@ -182,7 +186,9 @@ public final class SogouSettingsInjector {
        SogouIMESettings 复用为扩展设置页：
        - g0() before：扩展标记时返回 null → i0() 跳过原生 fragment，容器留空
        - h0() before：扩展标记时返回「扩展设置」→ setTitle 生效
-       - AbstractSogouPreferenceActivity.onCreate after：扩展标记时向 this.e 注入自绘 UI */
+       - onCreate after：扩展标记时向 this.e 注入自绘 UI
+       - onNewIntent after：singleTop 复用（设置主页点击入口时实例已在栈顶，
+         不重新走 onCreate）→ 同样注入扩展 UI 并设标题 */
     private static void hookExtPage(ClassLoader cl) {
         try {
             XposedHelpers.findAndHookMethod(CLS_MAIN_ACTIVITY, cl, "g0",
@@ -225,26 +231,55 @@ public final class SogouSettingsInjector {
                     new XC_MethodHook() {
                         @Override
                         protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                            try {
-                                Activity activity = (Activity) param.thisObject;
-                                if (!isExtPage(activity)) {
-                                    return;
-                                }
-                                FrameLayout container = (FrameLayout) XposedHelpers.getObjectField(activity, "e");
-                                if (container == null) {
-                                    return;
-                                }
-                                container.removeAllViews();
-                                container.addView(buildExtPage(activity));
-                                XposedBridge.log(LOG_TAG + "ext page ui injected");
-                            } catch (Throwable t) {
-                                XposedBridge.log(LOG_TAG + "ext page inject error: " + t);
-                            }
+                            injectExtPageIfNeeded((Activity) param.thisObject);
                         }
                     });
             XposedBridge.log(LOG_TAG + "ext page hook installed");
         } catch (Throwable t) {
             XposedBridge.log(LOG_TAG + "hook ext page failed: " + t);
+        }
+        try {
+            XposedHelpers.findAndHookMethod(CLS_SETTING_ACTIVITY, cl, "onNewIntent", Intent.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            try {
+                                // getIntent() 在 onNewIntent 时仍返回旧 intent（singleTop 复用场景），
+                                // 需手动 setIntent 更新，否则 isExtPage 读不到扩展标记
+                                Activity activity = (Activity) param.thisObject;
+                                activity.setIntent((Intent) param.args[0]);
+                            } catch (Throwable t) {
+                                XposedBridge.log(LOG_TAG + "onNewIntent setIntent error: " + t);
+                            }
+                        }
+
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            injectExtPageIfNeeded((Activity) param.thisObject);
+                        }
+                    });
+            XposedBridge.log(LOG_TAG + "ext page onNewIntent hook installed");
+        } catch (Throwable t) {
+            XposedBridge.log(LOG_TAG + "hook ext page onNewIntent failed: " + t);
+        }
+    }
+
+    /** 扩展标记时注入扩展页 UI；非扩展页直接忽略。onCreate 与 onNewIntent 共用 */
+    private static void injectExtPageIfNeeded(Activity activity) {
+        try {
+            if (!isExtPage(activity)) {
+                return;
+            }
+            FrameLayout container = (FrameLayout) XposedHelpers.getObjectField(activity, "e");
+            if (container == null) {
+                return;
+            }
+            container.removeAllViews();
+            container.addView(buildExtPage(activity));
+            activity.setTitle(LABEL_PAGE_TITLE);
+            XposedBridge.log(LOG_TAG + "ext page ui injected");
+        } catch (Throwable t) {
+            XposedBridge.log(LOG_TAG + "ext page inject error: " + t);
         }
     }
 
@@ -282,7 +317,7 @@ public final class SogouSettingsInjector {
         });
         root.addView(back);
 
-        // ---- 设置项卡片：输入过的项置顶 ----
+        // ---- 设置项卡片：粘贴后置顶 ----
         LinearLayout card = new LinearLayout(activity);
         card.setOrientation(LinearLayout.HORIZONTAL);
         card.setGravity(Gravity.CENTER_VERTICAL);
