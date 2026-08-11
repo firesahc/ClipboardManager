@@ -54,6 +54,7 @@ public final class ClipboardKeyboardInstrument {
     private static final String CLS_CLIP_REPO = "com.sohu.inputmethod.clipboard.p";
     /** 剪贴板条目实体（db.c 实体的混淆名，字段 d=content、c=time） */
     private static final String CLS_CLIP_ITEM = "com.sohu.inputmethod.clipboard.c";
+    private static final String CLS_VIEW_MODEL = "com.sohu.inputmethod.clipboard.ClipboardViewModel";
     /** 数据库门面 → session → dao 链：db.a.b().a().a() */
     private static final String CLS_DB_A = "com.sohu.inputmethod.clipboard.db.a";
 
@@ -92,6 +93,7 @@ public final class ClipboardKeyboardInstrument {
             hookClipboardLimit(cl);
             hookCandidateCount(cl);
             hookAdapterSelectAll(cl);
+            hookDeleteScope(cl);
             hookImeRestart(cl);
             XposedBridge.log("[ClipboardEnhance] all hooks installed");
         } catch (Throwable t) {
@@ -550,7 +552,77 @@ public final class ClipboardKeyboardInstrument {
         ((View) candidateView).invalidate();
     }
 
-    /* ================= 9. IME 重启（关闭再打开）时清空筛选 =================
+    /* ================= 9. 删除范围保护（筛选态下全选删除） =================
+       原生删除确认链：删除按钮 → L(7) → Keyboard.p() → w(N.g()) 弹确认框
+       → ClipboardKeyboard.d.onClick：
+           if (勾选集.size() != this.M.size()) → ViewModel.g(list) 逐条删勾选集
+           else                                → ViewModel.e() 清空全部
+       筛选态下 swapList 把 M 也写成了过滤子集，导致「全选勾选集 == M」
+       被原生误判为「清空全部」，实际清空整个数据库。
+       修复双保险：
+       - hook w(List) after：筛选态强制对话框文案为「删除N条」（避免误导）
+       - hook ViewModel.e() before：筛选态屏蔽清空全部，改删当前勾选集 */
+    private static void hookDeleteScope(ClassLoader cl) {
+        try {
+            XposedHelpers.findAndHookMethod(CLS_KEYBOARD, cl, "w", List.class,
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                            try {
+                                if (ListFilterProxy.getKeyword().length() > 0) {
+                                    // 原生文案分支取决于 list.size()==M.size()，筛选态恒相等；
+                                    // 直接覆写确认框文案为「删除N条」
+                                    Object dialog = XposedHelpers.getObjectField(param.thisObject, "Q");
+                                    if (dialog != null) {
+                                        @SuppressWarnings("unchecked")
+                                        List<Object> checked = (List<Object>) param.args[0];
+                                        String msg = "您确定删除剪贴板" + checked.size() + "条内容吗?";
+                                        XposedHelpers.callMethod(dialog, "setMessage", (Object) msg);
+                                        XposedBridge.log("[ClipboardEnhance] delete dialog msg: " + msg);
+                                    }
+                                }
+                            } catch (Throwable t) {
+                                XposedBridge.log("[ClipboardEnhance] delete dialog msg error: " + t);
+                            }
+                        }
+                    });
+            XposedBridge.log("[ClipboardEnhance] delete dialog hook installed");
+        } catch (Throwable t) {
+            XposedBridge.log("[ClipboardEnhance] hook Keyboard.w failed: " + t);
+        }
+        try {
+            XposedHelpers.findAndHookMethod(CLS_VIEW_MODEL, cl, "e",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                            try {
+                                if (ListFilterProxy.getKeyword().length() > 0) {
+                                    // 取当前勾选集（此刻全选勾选尚未清除）
+                                    Object kb = sKeyboard;
+                                    if (kb != null) {
+                                        Object adapter = XposedHelpers.getObjectField(kb, "N");
+                                        Object list = adapter == null ? null : XposedHelpers.callMethod(adapter, "g");
+                                        if (list instanceof List && !((List<?>) list).isEmpty()) {
+                                            // 屏蔽清空全部，重定向为只删勾选集
+                                            param.setResult(null);
+                                            XposedHelpers.callMethod(param.thisObject, "g", list);
+                                            XposedBridge.log("[ClipboardEnhance] clear-all rerouted to checked-only ("
+                                                    + ((List<?>) list).size() + ")");
+                                        }
+                                    }
+                                }
+                            } catch (Throwable t) {
+                                XposedBridge.log("[ClipboardEnhance] delete scope error: " + t);
+                            }
+                        }
+                    });
+            XposedBridge.log("[ClipboardEnhance] delete-scope hook installed");
+        } catch (Throwable t) {
+            XposedBridge.log("[ClipboardEnhance] hook ViewModel.e failed: " + t);
+        }
+    }
+
+    /* ================= 10. IME 重启（关闭再打开）时清空筛选 =================
        筛选关键词是静态状态；输入法服务重建（SogouIME.onCreate）后旧筛选
        不应残留 —— 关闭再打开应恢复全量。hook 基类 SogouIME（xiaomi.SogouIME
        为空子类）的 onCreate，after 清空关键词并复位搜索模式。
