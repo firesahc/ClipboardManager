@@ -41,7 +41,8 @@ import de.robv.android.xposed.XposedHelpers;
  * - 主页 fragment H() after：向 preferenceScreen 注入「扩展设置」入口项
  * - SogouIMESettings：intent 带 EXTRA_EXT_PAGE 标记时，g0() 返回 null 跳过原生 fragment、
  *   h0() 返回「扩展设置」标题、onCreate 后向容器 this.e 注入自绘扩展设置 UI
- * - 开关状态存宿主默认 SharedPreferences（与 IME 同进程，静态状态直接共享）
+ * - 开关状态存宿主默认 SharedPreferences（与 IME 同进程，静态状态直接共享），
+ *   运行时开关值经 ModuleState 读写（原直接访问 ClipboardKeyboardInstrument）
  */
 public final class SogouSettingsInjector {
 
@@ -55,9 +56,6 @@ public final class SogouSettingsInjector {
     private static final String CLS_PREF_LISTENER = "androidx.preference.Preference$OnPreferenceClickListener";
     /** 宿主全局 Context 提供者（InputSettingFragment 等普遍使用） */
     private static final String CLS_GLOBAL_CTX = "com.sogou.lib.common.content.b";
-
-    /* ================= 日志 ================= */
-    private static final String LOG_TAG = "[ClipboardEnhance] ";
 
     /* ================= 常量 ================= */
     /** 扩展设置页标记：SogouIMESettings intent extra，置 true 时展示扩展页而非原生主页 */
@@ -75,6 +73,11 @@ public final class SogouSettingsInjector {
     private static final String LABEL_BACK = "‹ 返回";
     private static final String LABEL_PIN_TITLE = "粘贴后置顶";
     private static final String LABEL_PIN_SUMMARY = "粘贴过的内容将排在列表最上方";
+    /** 自绘 UI 颜色（贴近原生设置项视觉） */
+    private static final int COLOR_PAGE_BG = 0xFFF2F3F5;      // 页面背景（浅灰）
+    private static final int COLOR_BACK_TEXT = 0xFF1677FF;    // 返回链接（蓝）
+    private static final int COLOR_TITLE_TEXT = 0xFF1F1F1F;   // 设置项标题（近黑）
+    private static final int COLOR_DESC_TEXT = 0xFF8A8A8A;    // 设置项说明（灰）
 
     private static volatile ClassLoader sCl;
 
@@ -87,14 +90,14 @@ public final class SogouSettingsInjector {
         try {
             hookSettingsEntry(cl);
             hookExtPage(cl);
-            XposedBridge.log(LOG_TAG + "settings injector installed");
+            XposedBridge.log(HookUtil.LOG_TAG + "settings injector installed");
         } catch (Throwable t) {
-            XposedBridge.log(LOG_TAG + "settings injector error: " + t);
+            XposedBridge.log(HookUtil.LOG_TAG + "settings injector error: " + t);
         }
     }
 
     /**
-     * 恢复置顶开关（IME 服务重启时调用，Instrument.hookImeRestart 挂钩）。
+     * 恢复置顶开关（IME 服务重启时调用，SearchModeController.hookImeRestart 挂钩）。
      * 设置页与 IME 同进程，开关切换后静态状态已同步；此方法保证进程冷启动后
      * 从 SharedPreferences 恢复持久化值。
      */
@@ -106,10 +109,10 @@ public final class SogouSettingsInjector {
             }
             boolean enabled = PreferenceManager.getDefaultSharedPreferences(ctx)
                     .getBoolean(SP_KEY_PIN_RECENT, SP_DEFAULT_PIN_RECENT);
-            ClipboardKeyboardInstrument.setPinRecentEnabled(enabled);
-            XposedBridge.log(LOG_TAG + "pin recent restored: " + enabled);
+            ModuleState.setPinRecentEnabled(enabled);
+            XposedBridge.log(HookUtil.LOG_TAG + "pin recent restored: " + enabled);
         } catch (Throwable t) {
-            XposedBridge.log(LOG_TAG + "restore pin setting error: " + t);
+            XposedBridge.log(HookUtil.LOG_TAG + "restore pin setting error: " + t);
         }
     }
 
@@ -117,52 +120,47 @@ public final class SogouSettingsInjector {
        主页 fragment H() 在 onCreatePreferences（G() 加载 XML 后）被调用；
        after 向 preferenceScreen 注入入口项。findPreference 防重复注入。 */
     private static void hookSettingsEntry(ClassLoader cl) {
-        try {
-            XposedHelpers.findAndHookMethod(CLS_MAIN_FRAGMENT, cl, "H",
-                    new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                            try {
-                                Object fragment = param.thisObject;
-                                // AbstractSogouPreferenceFragment.v = 关联 Activity
-                                Context ctx = (Context) XposedHelpers.getObjectField(fragment, "v");
-                                Object screen = XposedHelpers.callMethod(fragment, "getPreferenceScreen");
-                                if (ctx == null || screen == null) {
-                                    return;
-                                }
-                                if (XposedHelpers.callMethod(screen, "findPreference",
-                                        (Object) PREF_KEY_ENTRY) != null) {
-                                    return; // 已注入过（fragment 可能重建）
-                                }
-                                Object pref = XposedHelpers.newInstance(
-                                        XposedHelpers.findClass(CLS_SOGOU_PREF, sCl), ctx);
-                                XposedHelpers.callMethod(pref, "setKey", (Object) PREF_KEY_ENTRY);
-                                XposedHelpers.callMethod(pref, "setTitle", (Object) LABEL_ENTRY_TITLE);
-                                XposedHelpers.callMethod(pref, "setSummary", (Object) LABEL_ENTRY_SUMMARY);
-                                Class<?> listenerCls = XposedHelpers.findClass(CLS_PREF_LISTENER, sCl);
-                                Object listener = Proxy.newProxyInstance(sCl, new Class<?>[]{listenerCls},
-                                        new InvocationHandler() {
-                                            @Override
-                                            public Object invoke(Object proxy, Method method, Object[] args) {
-                                                if ("onPreferenceClick".equals(method.getName())) {
-                                                    openExtPage(ctx);
-                                                    return Boolean.TRUE;
-                                                }
-                                                return null;
-                                            }
-                                        });
-                                XposedHelpers.callMethod(pref, "setOnPreferenceClickListener", listener);
-                                XposedHelpers.callMethod(screen, "addPreference", pref);
-                                XposedBridge.log(LOG_TAG + "ext entry injected");
-                            } catch (Throwable t) {
-                                XposedBridge.log(LOG_TAG + "inject entry error: " + t);
+        HookUtil.safeHook("settings entry", () -> XposedHelpers.findAndHookMethod(CLS_MAIN_FRAGMENT, cl, "H",
+                new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        try {
+                            Object fragment = param.thisObject;
+                            // AbstractSogouPreferenceFragment.v = 关联 Activity
+                            Context ctx = (Context) XposedHelpers.getObjectField(fragment, "v");
+                            Object screen = XposedHelpers.callMethod(fragment, "getPreferenceScreen");
+                            if (ctx == null || screen == null) {
+                                return;
                             }
+                            if (XposedHelpers.callMethod(screen, "findPreference",
+                                    (Object) PREF_KEY_ENTRY) != null) {
+                                return; // 已注入过（fragment 可能重建）
+                            }
+                            Object pref = XposedHelpers.newInstance(
+                                    XposedHelpers.findClass(CLS_SOGOU_PREF, sCl), ctx);
+                            XposedHelpers.callMethod(pref, "setKey", (Object) PREF_KEY_ENTRY);
+                            XposedHelpers.callMethod(pref, "setTitle", (Object) LABEL_ENTRY_TITLE);
+                            XposedHelpers.callMethod(pref, "setSummary", (Object) LABEL_ENTRY_SUMMARY);
+                            Class<?> listenerCls = XposedHelpers.findClass(CLS_PREF_LISTENER, sCl);
+                            Object listener = Proxy.newProxyInstance(sCl, new Class<?>[]{listenerCls},
+                                    new InvocationHandler() {
+                                        @Override
+                                        public Object invoke(Object proxy, Method method, Object[] args) {
+                                            if ("onPreferenceClick".equals(method.getName())) {
+                                                openExtPage(ctx);
+                                                return Boolean.TRUE;
+                                            }
+                                            return null;
+                                        }
+                                    });
+                            XposedHelpers.callMethod(pref, "setOnPreferenceClickListener", listener);
+                            XposedHelpers.callMethod(screen, "addPreference", pref);
+                            XposedBridge.log(HookUtil.LOG_TAG + "ext entry injected");
+                        } catch (Throwable t) {
+                            XposedBridge.log(HookUtil.LOG_TAG + "inject entry error: " + t);
                         }
-                    });
-            XposedBridge.log(LOG_TAG + "settings entry hook installed");
-        } catch (Throwable t) {
-            XposedBridge.log(LOG_TAG + "hook settings entry failed: " + t);
-        }
+                    }
+                }));
     }
 
     /** 打开扩展设置页：复用宿主已注册的 SogouIMESettings，intent 携带扩展页标记 */
@@ -178,7 +176,7 @@ public final class SogouSettingsInjector {
             }
             context.startActivity(intent);
         } catch (Throwable t) {
-            XposedBridge.log(LOG_TAG + "open ext page error: " + t);
+            XposedBridge.log(HookUtil.LOG_TAG + "open ext page error: " + t);
         }
     }
 
@@ -190,78 +188,58 @@ public final class SogouSettingsInjector {
        - onNewIntent after：singleTop 复用（设置主页点击入口时实例已在栈顶，
          不重新走 onCreate）→ 同样注入扩展 UI 并设标题 */
     private static void hookExtPage(ClassLoader cl) {
-        try {
-            XposedHelpers.findAndHookMethod(CLS_MAIN_ACTIVITY, cl, "g0",
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                            try {
-                                if (isExtPage((Activity) param.thisObject)) {
-                                    param.setResult(null);
-                                }
-                            } catch (Throwable t) {
-                                XposedBridge.log(LOG_TAG + "g0 ext error: " + t);
+        HookUtil.safeHook("g0", () -> XposedHelpers.findAndHookMethod(CLS_MAIN_ACTIVITY, cl, "g0",
+                new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        try {
+                            if (isExtPage((Activity) param.thisObject)) {
+                                param.setResult(null);
                             }
+                        } catch (Throwable t) {
+                            XposedBridge.log(HookUtil.LOG_TAG + "g0 ext error: " + t);
                         }
-                    });
-            XposedBridge.log(LOG_TAG + "g0 hook installed");
-        } catch (Throwable t) {
-            XposedBridge.log(LOG_TAG + "hook g0 failed: " + t);
-        }
-        try {
-            XposedHelpers.findAndHookMethod(CLS_MAIN_ACTIVITY, cl, "h0",
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                            try {
-                                if (isExtPage((Activity) param.thisObject)) {
-                                    param.setResult(LABEL_PAGE_TITLE);
-                                }
-                            } catch (Throwable t) {
-                                XposedBridge.log(LOG_TAG + "h0 ext error: " + t);
+                    }
+                }));
+        HookUtil.safeHook("h0", () -> XposedHelpers.findAndHookMethod(CLS_MAIN_ACTIVITY, cl, "h0",
+                new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        try {
+                            if (isExtPage((Activity) param.thisObject)) {
+                                param.setResult(LABEL_PAGE_TITLE);
                             }
+                        } catch (Throwable t) {
+                            XposedBridge.log(HookUtil.LOG_TAG + "h0 ext error: " + t);
                         }
-                    });
-            XposedBridge.log(LOG_TAG + "h0 hook installed");
-        } catch (Throwable t) {
-            XposedBridge.log(LOG_TAG + "hook h0 failed: " + t);
-        }
-        try {
-            XposedHelpers.findAndHookMethod(CLS_ACTIVITY_BASE, cl, "onCreate", Bundle.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                            injectExtPageIfNeeded((Activity) param.thisObject);
+                    }
+                }));
+        HookUtil.safeHook("ext page", () -> XposedHelpers.findAndHookMethod(CLS_ACTIVITY_BASE, cl, "onCreate", Bundle.class,
+                new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        injectExtPageIfNeeded((Activity) param.thisObject);
+                    }
+                }));
+        HookUtil.safeHook("ext page onNewIntent", () -> XposedHelpers.findAndHookMethod(CLS_SETTING_ACTIVITY, cl, "onNewIntent", Intent.class,
+                new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        try {
+                            // getIntent() 在 onNewIntent 时仍返回旧 intent（singleTop 复用场景），
+                            // 需手动 setIntent 更新，否则 isExtPage 读不到扩展标记
+                            Activity activity = (Activity) param.thisObject;
+                            activity.setIntent((Intent) param.args[0]);
+                        } catch (Throwable t) {
+                            XposedBridge.log(HookUtil.LOG_TAG + "onNewIntent setIntent error: " + t);
                         }
-                    });
-            XposedBridge.log(LOG_TAG + "ext page hook installed");
-        } catch (Throwable t) {
-            XposedBridge.log(LOG_TAG + "hook ext page failed: " + t);
-        }
-        try {
-            XposedHelpers.findAndHookMethod(CLS_SETTING_ACTIVITY, cl, "onNewIntent", Intent.class,
-                    new XC_MethodHook() {
-                        @Override
-                        protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                            try {
-                                // getIntent() 在 onNewIntent 时仍返回旧 intent（singleTop 复用场景），
-                                // 需手动 setIntent 更新，否则 isExtPage 读不到扩展标记
-                                Activity activity = (Activity) param.thisObject;
-                                activity.setIntent((Intent) param.args[0]);
-                            } catch (Throwable t) {
-                                XposedBridge.log(LOG_TAG + "onNewIntent setIntent error: " + t);
-                            }
-                        }
+                    }
 
-                        @Override
-                        protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                            injectExtPageIfNeeded((Activity) param.thisObject);
-                        }
-                    });
-            XposedBridge.log(LOG_TAG + "ext page onNewIntent hook installed");
-        } catch (Throwable t) {
-            XposedBridge.log(LOG_TAG + "hook ext page onNewIntent failed: " + t);
-        }
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        injectExtPageIfNeeded((Activity) param.thisObject);
+                    }
+                }));
     }
 
     /** 扩展标记时注入扩展页 UI；非扩展页直接忽略。onCreate 与 onNewIntent 共用 */
@@ -277,9 +255,9 @@ public final class SogouSettingsInjector {
             container.removeAllViews();
             container.addView(buildExtPage(activity));
             activity.setTitle(LABEL_PAGE_TITLE);
-            XposedBridge.log(LOG_TAG + "ext page ui injected");
+            XposedBridge.log(HookUtil.LOG_TAG + "ext page ui injected");
         } catch (Throwable t) {
-            XposedBridge.log(LOG_TAG + "ext page inject error: " + t);
+            XposedBridge.log(HookUtil.LOG_TAG + "ext page inject error: " + t);
         }
     }
 
@@ -301,13 +279,13 @@ public final class SogouSettingsInjector {
 
         LinearLayout root = new LinearLayout(activity);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(0xFFF2F3F5);
+        root.setBackgroundColor(COLOR_PAGE_BG);
 
         // ---- 返回栏 ----
         TextView back = new TextView(activity);
         back.setText(LABEL_BACK);
         back.setTextSize(16);
-        back.setTextColor(0xFF1677FF);
+        back.setTextColor(COLOR_BACK_TEXT);
         back.setPadding(dp24, dp16, dp24, dp16);
         back.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -337,13 +315,13 @@ public final class SogouSettingsInjector {
         TextView name = new TextView(activity);
         name.setText(LABEL_PIN_TITLE);
         name.setTextSize(16);
-        name.setTextColor(0xFF1F1F1F);
+        name.setTextColor(COLOR_TITLE_TEXT);
         texts.addView(name);
 
         TextView desc = new TextView(activity);
         desc.setText(LABEL_PIN_SUMMARY);
         desc.setTextSize(12);
-        desc.setTextColor(0xFF8A8A8A);
+        desc.setTextColor(COLOR_DESC_TEXT);
         desc.setPadding(0, dp8, 0, 0);
         texts.addView(desc);
 
@@ -354,8 +332,8 @@ public final class SogouSettingsInjector {
             @Override
             public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
                 sp.edit().putBoolean(SP_KEY_PIN_RECENT, isChecked).apply();
-                ClipboardKeyboardInstrument.setPinRecentEnabled(isChecked);
-                XposedBridge.log(LOG_TAG + "pin recent switched: " + isChecked);
+                ModuleState.setPinRecentEnabled(isChecked);
+                XposedBridge.log(HookUtil.LOG_TAG + "pin recent switched: " + isChecked);
             }
         });
         card.addView(sw);
