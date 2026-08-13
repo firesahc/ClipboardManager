@@ -83,6 +83,13 @@ public final class ClipboardKeyboardInstrument {
 
     /** 模块状态 */
     private static volatile boolean sSearchMode = false;
+    /**
+     * 粘贴后置顶开关（默认开启，扩展设置页可关闭）。
+     * 开启时粘贴上屏后调用宿主 ClipboardKeyboard.O(String)（宿主原生插入链路：
+     * 按内容去重 + 更新时间戳 + orderDesc(Time) 排序 + LiveData 上报），
+     * 让宿主自主把刚粘贴的条目排到最上方；关闭时退化为原生行为（粘贴后列表不动）。
+     */
+    private static volatile boolean sPinRecentEnabled = true;
     private static volatile Object sPage;          // ClipboardPage 实例
     private static volatile Object sKeyboard;      // ClipboardKeyboard 实例
     private static volatile ClassLoader sCl;       // 目标进程类加载器
@@ -426,11 +433,14 @@ public final class ClipboardKeyboardInstrument {
         }
     }
 
-    /* ================= 4a. 剪贴板条目粘贴上屏：兜底复位搜索模式 + 记录置顶 =================
+    /* ================= 4a. 剪贴板条目粘贴上屏：兜底复位搜索模式 + 置顶 =================
        剪贴板上屏路径 a(int) → u.Z().A(...)，不走拼音候选；
        若搜索模式残留，点击条目时在此复位，防止误拦截。
-       after 记录本次粘贴条目到 ListFilterProxy（置顶功能：粘贴过的排最上方），
-       并触发 swapList 立即重排列表。 */
+       after 置顶：开关开启时调用宿主原生入口 O(String)（updateClipboardUIWhenAdd，
+       即宿主「外部内容进入剪贴板」的标准链路：p.z → 异步插入 p.H 按内容去重 +
+       更新时间戳 → u 注册回调查询 orderDesc(Time) → LiveData 上报 → onChanged 刷新），
+       刚粘贴的条目时间戳最新自动排到最上方；之后新复制的内容（时间戳更新）仍压它一头；
+       排序/去重/上报/刷新全部复用宿主逻辑，模块不维护置顶列表。 */
     private static void hookKeyboardItem(ClassLoader cl) {
         try {
             XposedHelpers.findAndHookMethod(CLS_KEYBOARD, cl, "a", int.class,
@@ -463,11 +473,17 @@ public final class ClipboardKeyboardInstrument {
                                 return;
                             }
                             try {
-                                ListFilterProxy.markInput(committed);
-                                XposedBridge.log(LOG_TAG + "item committed -> pin to top");
-                                swapList();
+                                if (isPinRecentEnabled()) {
+                                    Object text = XposedHelpers.getObjectField(committed, "d");
+                                    if (text != null) {
+                                        XposedHelpers.callMethod(param.thisObject, "O", String.valueOf(text));
+                                        XposedBridge.log(LOG_TAG + "item committed -> host re-pin via O()");
+                                    }
+                                }
                             } catch (Throwable t) {
                                 XposedBridge.log(LOG_TAG + "pin-after-commit error: " + t);
+                                // 宿主 O() 反射失败兜底：仅刷新列表（不置顶），保持显示一致
+                                swapList();
                             }
                         }
                     });
@@ -767,7 +783,6 @@ public final class ClipboardKeyboardInstrument {
                             try {
                                 sSearchMode = false;
                                 ListFilterProxy.clearKeyword();
-                                ListFilterProxy.clearRecentInput();
                                 SogouSettingsInjector.restorePinRecentSetting();
                                 XposedBridge.log(LOG_TAG + "IME recreated, filter cleared");
                             } catch (Throwable t) {
@@ -903,5 +918,19 @@ public final class ClipboardKeyboardInstrument {
     /** 供 ListFilterProxy 回调：写回后刷新列表 */
     static {
         ListFilterProxy.setOnSwap(ClipboardKeyboardInstrument::swapList);
+    }
+
+    /* ================= 粘贴后置顶开关 =================
+       状态存于本类（宿主 O() 方案的开关只控制「粘贴后是否调宿主插入链路」，
+       不影响列表过滤，故不放在 ListFilterProxy）。
+       默认开启；扩展设置页 Switch 切换后写 SharedPreferences，
+       IME 进程冷启动由 SogouSettingsInjector.restorePinRecentSetting() 恢复。 */
+
+    public static boolean isPinRecentEnabled() {
+        return sPinRecentEnabled;
+    }
+
+    public static void setPinRecentEnabled(boolean enabled) {
+        sPinRecentEnabled = enabled;
     }
 }

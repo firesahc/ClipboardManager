@@ -106,7 +106,7 @@ public final class SogouSettingsInjector {
             }
             boolean enabled = PreferenceManager.getDefaultSharedPreferences(ctx)
                     .getBoolean(SP_KEY_PIN_RECENT, SP_DEFAULT_PIN_RECENT);
-            ListFilterProxy.setPinRecentEnabled(enabled);
+            ClipboardKeyboardInstrument.setPinRecentEnabled(enabled);
             XposedBridge.log(LOG_TAG + "pin recent restored: " + enabled);
         } catch (Throwable t) {
             XposedBridge.log(LOG_TAG + "restore pin setting error: " + t);
@@ -354,7 +354,7 @@ public final class SogouSettingsInjector {
             @Override
             public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
                 sp.edit().putBoolean(SP_KEY_PIN_RECENT, isChecked).apply();
-                ListFilterProxy.setPinRecentEnabled(isChecked);
+                ClipboardKeyboardInstrument.setPinRecentEnabled(isChecked);
                 XposedBridge.log(LOG_TAG + "pin recent switched: " + isChecked);
             }
         });

@@ -18,6 +18,9 @@ import java.util.List;
  *
  * 过滤对象模拟 c 类：字段 d（String）为条目文本，与 ListFilterProxy 反射读取的
  * 字段名保持一致。ListFilterProxy 为静态状态，每个用例在 @Before 中重建基线。
+ *
+ * 置顶功能不在本类测试：已改为调用宿主 ClipboardKeyboard.O(String) 的插入链路
+ * （宿主去重 + 更新时间戳 + 排序），由宿主逻辑保证，本类只管搜索过滤。
  */
 public class ListFilterProxyTest {
 
@@ -36,10 +39,8 @@ public class ListFilterProxyTest {
 
     @Before
     public void setUp() {
-        // 重置静态状态：清空关键词、置顶记录并恢复默认开关，注入空列表（等价于无列表基线）
+        // 重置静态状态：清空关键词，注入空列表（等价于无列表基线）
         ListFilterProxy.clearKeyword();
-        ListFilterProxy.clearRecentInput();
-        ListFilterProxy.setPinRecentEnabled(true);
         ListFilterProxy.onListChanged(new ArrayList<Object>());
     }
 
@@ -170,124 +171,59 @@ public class ListFilterProxyTest {
         assertEquals(0, ListFilterProxy.filteredCount());
     }
 
-    /* ================= 置顶功能（输入过的条目排最上方） ================= */
+    /* ================= 宿主自主排序契约（改造后：模块不干预排序） =================
+       置顶由宿主 ClipboardKeyboard.O(String) 链路完成（按内容去重 + 更新时间戳 +
+       orderDesc(Time) 倒序查询 + LiveData 上报），宿主上报的新列表顺序即最终顺序。
+       本类只保证：
+       1) 无过滤时 activeList 与宿主列表引用同一、顺序原样（新复制的永远在最上）；
+       2) 过滤时遍历顺序与宿主一致（新复制的若命中关键词仍排最前）；
+       3) 粘贴后宿主把该条目提到最前的上报结果，模块原样接受、不重排。 */
 
     @Test
-    public void markInput_movesItemToFront() {
-        List<Object> full = Arrays.<Object>asList(item("a"), item("b"), item("c"));
-        ListFilterProxy.onListChanged(full);
-        ListFilterProxy.markInput(full.get(1));
+    public void onListChanged_newCopyAtTop_keepsHostOrder() {
+        List<Object> before = Arrays.<Object>asList(item("old-1"), item("old-2"));
+        ListFilterProxy.onListChanged(before);
+
+        // 新复制后宿主上报新列表：新复制条目时间戳最新，宿主排在最前（index 0）
+        List<Object> fresh = new ArrayList<>();
+        fresh.add(item("new-copied"));
+        fresh.addAll(before);
+        ListFilterProxy.onListChanged(fresh);
 
         List<Object> active = ListFilterProxy.activeList();
         assertEquals(3, active.size());
-        assertSame(full.get(1), active.get(0)); // b 置顶
-        assertSame(full.get(0), active.get(1)); // 其余保持原顺序
-        assertSame(full.get(2), active.get(2));
+        assertSame(fresh, active);               // 无过滤：引用同一，模块零干预
+        assertSame(fresh.get(0), active.get(0)); // 新复制仍在所有旧条目最上面
+        assertSame(fresh.get(1), active.get(1)); // 旧条目相对顺序原样
     }
 
     @Test
-    public void markInput_recentOrder_isLifo() {
+    public void onListChanged_pastedItemRehostedAtTop_keepsHostOrder() {
         List<Object> full = Arrays.<Object>asList(item("a"), item("b"), item("c"));
         ListFilterProxy.onListChanged(full);
-        ListFilterProxy.markInput(full.get(0));
-        ListFilterProxy.markInput(full.get(2));
+
+        // 粘贴后模块调宿主 O()：宿主按内容去重命中 b 并更新时间戳，
+        // 随后上报新列表把 b 提到最前（index 0）
+        List<Object> rehosted = Arrays.<Object>asList(full.get(1), full.get(0), full.get(2));
+        ListFilterProxy.onListChanged(rehosted);
 
         List<Object> active = ListFilterProxy.activeList();
-        assertSame(full.get(2), active.get(0)); // 最近输入的 c 在最前
-        assertSame(full.get(0), active.get(1));
-        assertSame(full.get(1), active.get(2));
+        assertSame(rehosted, active);            // 模块不重排，原样接受宿主排序结果
+        assertSame(full.get(1), active.get(0));  // 刚粘贴的 b 由宿主置顶到最上
     }
 
     @Test
-    public void markInput_repeat_doesNotDuplicate() {
-        List<Object> full = Arrays.<Object>asList(item("a"), item("b"), item("c"));
-        ListFilterProxy.onListChanged(full);
-        ListFilterProxy.markInput(full.get(1));
-        ListFilterProxy.markInput(full.get(1)); // 再次输入同一对象：只提升不重复
+    public void filter_preservesHostOrder_newCopyStaysFirstWhenMatched() {
+        List<Object> fresh = new ArrayList<>();
+        fresh.add(item("new-match"));   // 新复制的：宿主排最前
+        fresh.add(item("old-a"));
+        fresh.add(item("old-match"));
+        ListFilterProxy.onListChanged(fresh);
+        ListFilterProxy.setKeyword("match");
 
         List<Object> active = ListFilterProxy.activeList();
-        assertEquals(3, active.size());
-        assertSame(full.get(1), active.get(0));
-    }
-
-    @Test
-    public void markInput_null_isIgnored() {
-        List<Object> full = Arrays.<Object>asList(item("a"), item("b"));
-        ListFilterProxy.onListChanged(full);
-        ListFilterProxy.markInput(null);
-
-        assertSame(full, ListFilterProxy.activeList()); // 无重排，引用同一性保持
-    }
-
-    @Test
-    public void markInput_capacity_evictsOldest() {
-        List<Object> full = new ArrayList<>();
-        for (int i = 0; i < 25; i++) {
-            full.add(item("x" + i));
-        }
-        ListFilterProxy.onListChanged(full);
-        // 输入 x0..x24，共 25 条 > 容量 20 → x0..x4 被挤出
-        for (int i = 0; i < 25; i++) {
-            ListFilterProxy.markInput(full.get(i));
-        }
-
-        List<Object> active = ListFilterProxy.activeList();
-        assertEquals(25, active.size());
-        assertSame(full.get(24), active.get(0));  // 最近输入在最前
-        assertSame(full.get(5), active.get(19));  // 保留的最旧置顶项在置顶区末尾
-        // 被挤出的 x0..x4 回到置顶区之后的原始相对位置
-        for (int i = 0; i < 5; i++) {
-            assertSame(full.get(i), active.get(20 + i));
-        }
-    }
-
-    @Test
-    public void markInput_disabled_keepsOriginalOrder() {
-        List<Object> full = Arrays.<Object>asList(item("a"), item("b"), item("c"));
-        ListFilterProxy.setPinRecentEnabled(false);
-        ListFilterProxy.onListChanged(full);
-        ListFilterProxy.markInput(full.get(1));
-
-        assertSame(full, ListFilterProxy.activeList()); // 关闭时原样返回
-    }
-
-    @Test
-    public void setPinRecentEnabled_appliesImmediately() {
-        List<Object> full = Arrays.<Object>asList(item("a"), item("b"), item("c"));
-        ListFilterProxy.onListChanged(full);
-        ListFilterProxy.markInput(full.get(2));
-        ListFilterProxy.setPinRecentEnabled(false);
-
-        assertSame(full, ListFilterProxy.activeList()); // 关闭后立即恢复原始顺序
-
-        ListFilterProxy.setPinRecentEnabled(true);
-        assertSame(full.get(2), ListFilterProxy.activeList().get(0)); // 重新开启后置顶恢复
-    }
-
-    @Test
-    public void markInput_thenFilter_keepsPinOrderWithinFiltered() {
-        List<Object> full = Arrays.<Object>asList(item("aa"), item("bb"), item("ab"), item("ba"));
-        ListFilterProxy.onListChanged(full);
-        ListFilterProxy.markInput(full.get(2)); // "ab"
-        ListFilterProxy.markInput(full.get(0)); // "aa"
-        ListFilterProxy.setKeyword("a");
-
-        // 置顶顺序：aa, ab；过滤 "a" 后：aa, ab, ba（bb 不含 a）
-        List<Object> active = ListFilterProxy.activeList();
-        assertEquals(3, active.size());
-        assertSame(full.get(0), active.get(0));
-        assertSame(full.get(2), active.get(1));
-        assertSame(full.get(3), active.get(2));
-    }
-
-    @Test
-    public void markInput_itemFromOtherList_isSkipped() {
-        List<Object> full = Arrays.<Object>asList(item("a"), item("b"));
-        ListFilterProxy.onListChanged(full);
-        ListFilterProxy.markInput(item("external")); // 不在当前列表的引用：置顶区无此对象
-
-        assertEquals(2, ListFilterProxy.filteredCount());
-        assertEquals(2, ListFilterProxy.activeList().size());
-        assertSame(full.get(0), ListFilterProxy.activeList().get(0));
+        assertEquals(2, active.size());
+        assertSame(fresh.get(0), active.get(0)); // 新复制的命中关键词仍排最前
+        assertSame(fresh.get(2), active.get(1)); // 旧条目保持宿主相对顺序
     }
 }
