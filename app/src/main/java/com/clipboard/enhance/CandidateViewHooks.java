@@ -360,10 +360,14 @@ public final class CandidateViewHooks {
                 if (text == null) {
                     continue;
                 }
-                XposedHelpers.callMethod(commit, "A", String.valueOf(text));
+                String content = String.valueOf(text);
+                XposedHelpers.callMethod(commit, "A", content);
+                PasteCounter.increment(content); // 每条上屏计数 +1（持久化）
                 n++;
             }
             XposedBridge.log(HookUtil.LOG_TAG + "committed " + n + " items, stay in manage mode");
+            // 保持整理态：不退出；刷新列表使新计数可见
+            KeyboardListHooks.swapList();
             // 保持整理态：不退出；按钮计数由下一次 drawBase 自动刷新
         } catch (Throwable t) {
             XposedBridge.log(HookUtil.LOG_TAG + "commitAll error: " + t);

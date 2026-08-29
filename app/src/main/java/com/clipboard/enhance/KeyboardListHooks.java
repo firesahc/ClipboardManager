@@ -184,11 +184,19 @@ public final class KeyboardListHooks {
                             return;
                         }
                         try {
-                            if (ModuleState.isPinRecentEnabled()) {
-                                Object text = XposedHelpers.getObjectField(committed, "d");
-                                if (text != null) {
-                                    XposedHelpers.callMethod(param.thisObject, "O", String.valueOf(text));
+                            Object text = XposedHelpers.getObjectField(committed, "d");
+                            if (text != null) {
+                                String content = String.valueOf(text);
+                                // 粘贴计数 +1（持久化），与置顶逻辑互不耦合
+                                PasteCounter.increment(content);
+                                XposedBridge.log(HookUtil.LOG_TAG + "paste increment: content.len=" + content.length()
+                                        + " count=" + PasteCounter.getCount(content));
+                                if (ModuleState.isPinRecentEnabled()) {
+                                    XposedHelpers.callMethod(param.thisObject, "O", content);
                                     XposedBridge.log(HookUtil.LOG_TAG + "item committed -> host re-pin via O()");
+                                } else {
+                                    // 无置顶时主动刷新列表，使新计数可见
+                                    swapList();
                                 }
                             }
                         } catch (Throwable t) {
