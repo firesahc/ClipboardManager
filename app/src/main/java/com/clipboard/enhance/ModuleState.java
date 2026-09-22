@@ -1,5 +1,7 @@
 package com.clipboard.enhance;
 
+import java.lang.ref.WeakReference;
+
 /**
  * 模块共享状态集中地（Xposed hook 间传递的宿主实例/类加载器/开关）。
  *
@@ -14,12 +16,12 @@ public final class ModuleState {
 
     /** 目标进程类加载器（init 时注入，各 hook 反射查找宿主类用） */
     private static volatile ClassLoader sCl;
-    /** ClipboardPage 实例（hookPageCreate 记录，搜索时收起面板用） */
-    private static volatile Object sPage;
-    /** ClipboardKeyboard 实例（onChanged 记录，列表写回/上屏用） */
-    private static volatile Object sKeyboard;
-    /** ClipboardCandidateView 实例（drawBase 记录，计数刷新用） */
-    private static volatile Object sCandidateView;
+    /** ClipboardPage 实例（弱持有：宿主重建页面时不阻止旧页面回收，避免常驻IME进程泄漏） */
+    private static volatile WeakReference<Object> sPageRef;
+    /** ClipboardKeyboard 实例（弱持有，理由同上） */
+    private static volatile WeakReference<Object> sKeyboardRef;
+    /** ClipboardCandidateView 实例（弱持有，理由同上） */
+    private static volatile WeakReference<Object> sCandidateViewRef;
     /**
      * 搜索模式标志：为 true 时所有面板（拼音/符号/数字/其他输入法）经 InputConnection.commitText
      * 上屏的字符被统一拦截、累积进 sSearchBuffer，不真正上屏，等待「完成」按钮把缓冲区作为关键词应用。
@@ -51,27 +53,37 @@ public final class ModuleState {
     }
 
     public static Object page() {
-        return sPage;
+        WeakReference<Object> r = sPageRef;
+        return r == null ? null : r.get();
     }
 
     public static void setPage(Object page) {
-        sPage = page;
+        sPageRef = page == null ? null : new WeakReference<>(page);
     }
 
     public static Object keyboard() {
-        return sKeyboard;
+        WeakReference<Object> r = sKeyboardRef;
+        return r == null ? null : r.get();
     }
 
     public static void setKeyboard(Object keyboard) {
-        sKeyboard = keyboard;
+        sKeyboardRef = keyboard == null ? null : new WeakReference<>(keyboard);
     }
 
     public static Object candidateView() {
-        return sCandidateView;
+        WeakReference<Object> r = sCandidateViewRef;
+        return r == null ? null : r.get();
     }
 
     public static void setCandidateView(Object candidateView) {
-        sCandidateView = candidateView;
+        sCandidateViewRef = candidateView == null ? null : new WeakReference<>(candidateView);
+    }
+
+    /** 主动释放宿主View/Page持有（IME销毁/模块关闭时调用，避免弱引用残留） */
+    public static void clearHostRefs() {
+        sPageRef = null;
+        sKeyboardRef = null;
+        sCandidateViewRef = null;
     }
 
     public static boolean isSearchMode() {
