@@ -15,6 +15,8 @@ import java.util.List;
  * - 置顶功能不在此处实现：粘贴后由 Instrument 调用宿主 ClipboardKeyboard.O(String)
  *   （宿主按内容去重 + 更新时间戳 + orderDesc(Time) 排序 + LiveData 上报），
  *   排序完全由宿主负责，本类只管搜索过滤。
+ * - 本类为纯逻辑，不持有写回回调：setKeyword/clearKeyword/onListChanged 只重算
+ *   sActive，写回 M/j 由调用方显式调 KeyboardListHooks.swapList()（避免隐式回调环）。
  */
 public final class ListFilterProxy {
 
@@ -24,14 +26,8 @@ public final class ListFilterProxy {
     private static volatile List<Object> sActive;
     /** 当前搜索关键词（空 = 不过滤） */
     private static volatile String sKeyword = "";
-    /** 过滤源监听（Instrument 设置，用于写回后通知刷新） */
-    private static volatile Runnable sOnSwap;
 
     private ListFilterProxy() {
-    }
-
-    public static void setOnSwap(Runnable r) {
-        sOnSwap = r;
     }
 
     /** onChanged 上报新列表（全量） */
@@ -95,13 +91,6 @@ public final class ListFilterProxy {
                 }
             }
             sActive = out;
-        }
-        Runnable r = sOnSwap;
-        if (r != null) {
-            try {
-                r.run();
-            } catch (Throwable ignored) {
-            }
         }
     }
 

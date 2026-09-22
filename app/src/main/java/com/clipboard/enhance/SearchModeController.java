@@ -152,10 +152,11 @@ public final class SearchModeController {
 
     /* ================= 模块动作 ================= */
 
-    /** 清空筛选状态：复位搜索模式 + 清空关键词（触发 swapList 写回全量） */
+    /** 清空筛选状态：复位搜索模式 + 清空关键词 + 显式写回全量（ListFilterProxy无回调，调用方负责swap） */
     private static void resetFilterState() {
         ModuleState.setSearchMode(false);
         ListFilterProxy.clearKeyword();
+        KeyboardListHooks.swapList();
     }
 
     /** 清除筛选：恢复全量列表（按钮「全部」） */

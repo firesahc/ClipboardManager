@@ -1,5 +1,7 @@
 package com.clipboard.enhance;
 
+import android.content.Context;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -24,8 +26,8 @@ import de.robv.android.xposed.XposedHelpers;
  * - ClipboardViewModel.e() = 清空全部（删除确认链的「全删」分支）
  *
  * swapList 为「把当前过滤列表写回原生并刷新」的唯一入口，供 SearchModeController
- * （搜索/清除筛选动作）复用；ListFilterProxy 的过滤回调也注册到这里（原 Instrument
- * 静态块职责，随 swapList 一并迁入）。
+ * （搜索/清除筛选动作）复用；ListFilterProxy 保持纯逻辑（无回调），调用方在
+ * setKeyword/clearKeyword/onListChanged 后显式调 swapList，避免隐式回调环。
  */
 public final class KeyboardListHooks {
 
@@ -36,11 +38,6 @@ public final class KeyboardListHooks {
 
     /** 删除确认框文案模板（与原生 w() 文案一致，筛选态覆写时使用） */
     private static final String DELETE_MSG_TEMPLATE = "您确定删除剪贴板%d条内容吗?";
-
-    static {
-        // 过滤/恢复后通知刷新（原 ClipboardKeyboardInstrument 静态块职责，随 swapList 迁入）
-        ListFilterProxy.setOnSwap(KeyboardListHooks::swapList);
-    }
 
     private KeyboardListHooks() {
     }
@@ -61,6 +58,9 @@ public final class KeyboardListHooks {
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         try {
                             ModuleState.setKeyboard(param.thisObject);
+                            if (param.thisObject instanceof Context) {
+                                PasteCounter.init((Context) param.thisObject);
+                            }
                             @SuppressWarnings("unchecked")
                             List<Object> full = (List<Object>) param.args[0];
                             ListFilterProxy.onListChanged(full);
@@ -137,6 +137,9 @@ public final class KeyboardListHooks {
         if (curObj instanceof List) {
             @SuppressWarnings("unchecked")
             List<Object> cur = (List<Object>) curObj;
+            if (cur == active) {
+                return; // 同一对象：宿主已持有生效列表，无需原地重写，避免自清空
+            }
             cur.clear();
             cur.addAll(active);
         } else {
