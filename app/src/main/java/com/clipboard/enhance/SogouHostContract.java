@@ -10,6 +10,7 @@ package com.clipboard.enhance;
  * - CLIPBOARD_* ↔ KeyboardListHooks / CandidateViewHooks / ClipboardLimitBypass
  * - INPUT_* ↔ SearchModeController（Route X缓冲拦截）
  * - PAGE_BASE 与 ROUTE_NAV ↔ SearchModeController（搜索态入口劫持为完成）
+ * - SCROLL_CANDIDATE ↔ SearchModeController（搜索态首选高亮：f7 选中色覆盖）
  */
 public final class SogouHostContract {
 
@@ -43,6 +44,8 @@ public final class SogouHostContract {
     public static final String IME_SOGOU = "com.sohu.inputmethod.sogou.SogouIME";
     /** 路由导航器：搜索态入口劫持为完成的统一漏斗（工具栏/更多菜单/自定义行） */
     public static final String ROUTE_NAV = "com.sogou.lib.spage.a";
+    /** 滚动拼音候选视图：搜索态首选高亮宿主（选中色由 q2.f7 逐次重算） */
+    public static final String SCROLL_CANDIDATE = "com.sohu.inputmethod.sogou.q2";
 
     /** 启动诊断：逐项探测类存在性，输出能力矩阵（成功≠行为兼容，失败=对应功能禁用） */
     public static String probe(ClassLoader cl) {
@@ -50,11 +53,13 @@ public final class SogouHostContract {
                 CLIPBOARD_KEYBOARD, CLIPBOARD_ADAPTER, CLIPBOARD_VIEW_MODEL,
                 CLIPBOARD_REPO, CLIPBOARD_CANDIDATE_VIEW,
                 INPUT_LOGIC, INPUT_IC_U, PAGE_CLIPBOARD, ROUTE_NAV,
+                SCROLL_CANDIDATE,
         };
         String[] labels = {
                 "Keyboard", "Adapter", "ViewModel",
                 "Repo(p.H)", "CandidateView",
                 "InputLogic", "ic.u", "ClipboardPage", "spageNav",
+                "ScrollCand",
         };
         StringBuilder sb = new StringBuilder("Host capabilities:");
         for (int i = 0; i < names.length; i++) {

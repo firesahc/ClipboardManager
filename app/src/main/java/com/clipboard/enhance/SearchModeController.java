@@ -6,7 +6,7 @@ import de.robv.android.xposed.XposedHelpers;
 
 /**
  * 搜索模式领域：模式状态动作、拼音候选拦截（pickSuggestion）、提交缓冲拦截、
- * 搜索态剪贴板入口劫持（入口即完成）、页面路由、IME 生命周期清理。
+ * 搜索态剪贴板入口劫持（入口即完成）、搜索态候选高亮、页面路由、IME 生命周期清理。
  *
  * 逆向事实：
  * - com.sohu.inputmethod.input.InputLogic.pickSuggestion(CharSequence) =
@@ -40,6 +40,14 @@ public final class SearchModeController {
      * 搜索态下命中 ClipboardPage 路由即转为 onFinishSearch，不真正切页。
      */
     private static final String CLS_NAV = "com.sogou.lib.spage.a";
+    /**
+     * 滚动拼音候选视图：输入界面候选条本体，自绘链覆盖选中项与普通项。
+     * 选中项颜色由 q2.f7(B1) 逐次重算，搜索态下 override f7 即把首选项染绿，
+     * 对标原生首选项变蓝，其余项保持原生色。
+     */
+    private static final String CLS_SCROLL_CAND = "com.sohu.inputmethod.sogou.q2";
+    /** 搜索态完成标识色：完成绿；常量集中一处，真机浅色/深色皮肤验证后可调 */
+    private static final int SEARCH_DONE_HIGHLIGHT = 0xFF16A34A;
 
     private SearchModeController() {
     }
@@ -49,6 +57,7 @@ public final class SearchModeController {
         hookCommit(cl);
         hookCommitBuffer(cl);
         hookClipboardEntryAsFinish(cl);
+        hookSearchHighlight(cl);
         hookPageCreate(cl);
         hookImeRestart(cl);
         hookImeCollapse(cl);
@@ -147,6 +156,23 @@ public final class SearchModeController {
         HookUtil.safeHook("spage.c-as-finish", () -> XposedHelpers.findAndHookMethod(CLS_NAV, cl, "c", String.class, navHook));
         HookUtil.safeHook("spage.d-as-finish", () -> XposedHelpers.findAndHookMethod(CLS_NAV, cl, "d", String.class, android.os.Bundle.class, navHook));
         HookUtil.safeHook("BaseSPage.F-as-finish", () -> XposedHelpers.findAndHookMethod(CLS_PAGE_BASE, cl, "F", String.class, android.os.Bundle.class, pageHook));
+    }
+
+    /* ================= 1d. 搜索态拼音首选高亮（Route X 常驻标识） =================
+       宿主事实：候选条选中项每次绘制都被 q2.f7(B1) 重算覆盖，普通项颜色与选中项无关。
+       故只 override f7：after 在搜索态直接返回完成绿，首选项即绿，其余项保持原生色。
+       f7 为 q2 私有纯函数且仅选中着色调用；纯函数覆盖，无存取、无泄漏；
+       非搜索态守卫直接放行，零行为变化。方法缺失时 safeHook 打失败日志，不抛异常。 */
+    private static void hookSearchHighlight(ClassLoader cl) {
+        HookUtil.safeHook("selectedColor.f7", () -> XposedHelpers.findAndHookMethod(CLS_SCROLL_CAND, cl, "f7", int.class,
+                new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        if (ModuleState.isSearchMode()) {
+                            param.setResult(SEARCH_DONE_HIGHLIGHT);
+                        }
+                    }
+                }));
     }
 
     /* ================= 2. 页面实例记录 ================= */
