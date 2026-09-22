@@ -1,12 +1,26 @@
+# Gradle / Android 构建产物
 .gradle/
 build/
 local.properties
-.idea/
-*.iml
 .cxx/
 captures/
 .externalNativeBuild/
+
+# IntelliJ / Android Studio
+.idea/
+*.iml
+
+# Eclipse / Buildship（根目录与 app 模块均适用）
+.project
+.classpath
+.settings/
+**/.settings/
+org.eclipse.buildship.core.prefs
+
+# 操作系统
 .DS_Store
+
+# 项目本地目录
 /data/
 /.omo/
 /.codegraph/
