@@ -27,6 +27,12 @@ public final class SearchModeController {
     private static final String CLS_INPUT_LOGIC = "com.sohu.inputmethod.input.InputLogic";
     private static final String CLS_PAGE = "com.sohu.inputmethod.main.page.ClipboardPage";
     private static final String CLS_PAGE_BASE = "com.sohu.inputmethod.main.page.base.BaseSPage";
+    /**
+     * 上屏落点实现类：getSogouInputConnection() 返回 com.sogou.bu.basic.ic.f 单例持有的
+     * com.sogou.bu.basic.ic.u（implements ic.g）。符号/数字/其他输入法均经其 commitText
+     * 上屏，是 Route X 搜索态缓冲拦截的统一入口（覆盖拼音 pickSuggestion 之外的所有面板）。
+     */
+    private static final String CLS_IC_U = "com.sogou.bu.basic.ic.u";
 
     private SearchModeController() {
     }
@@ -34,40 +40,54 @@ public final class SearchModeController {
     /** 注册本领域全部 hook（注册顺序与拆分前一致） */
     public static void init(ClassLoader cl) {
         hookCommit(cl);
+        hookCommitBuffer(cl);
         hookPageCreate(cl);
         hookImeRestart(cl);
         hookImeCollapse(cl);
     }
 
-    /* ================= 1. 拼音候选选词拦截（搜索模式） =================
-       InputLogic.pickSuggestion(CharSequence) = 拼音候选选词上屏入口；
-       剪贴板上屏走 u.A() 与 pickSuggestion 完全分离，互不干扰 */
+    /* ================= 1. 拼音候选选词（搜索关键词拦截已迁移至 commitText 缓冲，Route X） =================
+       InputLogic.pickSuggestion(CharSequence) 原为拼音搜索关键词拦截点。Route X 改为统一
+       拦截 InputConnection.commitText（覆盖拼音/符号/数字/其他输入法），见 hookCommitBuffer。
+       本 hook 不再拦截候选（搜索态提交由缓冲 Hook 统一累积），保留注册仅为向后兼容。 */
     private static void hookCommit(ClassLoader cl) {
         HookUtil.safeHook("pickSuggestion", () -> XposedHelpers.findAndHookMethod(CLS_INPUT_LOGIC, cl, "pickSuggestion", CharSequence.class,
                 new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        try {
-                            if (!ModuleState.isSearchMode()) {
-                                return; // 正常输入放行
-                            }
-                            CharSequence cs = (CharSequence) param.args[0];
-                            String keyword = cs == null ? null : cs.toString();
-                            if (keyword == null || keyword.length() == 0) {
-                                return;
-                            }
-                            // 搜索模式：拦截为关键词，不真正上屏
-                            ModuleState.setSearchMode(false);
-                            param.setResult(null);
-                            XposedBridge.log(HookUtil.LOG_TAG + "pickSuggestion(\"" + keyword + "\") intercepted -> keyword");
-                            ListFilterProxy.setKeyword(keyword);
-                            reopenClipboardPage();
-                            KeyboardListHooks.swapList();
-                        } catch (Throwable t) {
-                            XposedBridge.log(HookUtil.LOG_TAG + "pickSuggestion error: " + t);
-                        }
+                        // Route X：搜索态提交统一由 hookCommitBuffer 处理，此处放行不拦截
                     }
                 }));
+    }
+
+    /* ================= 1b. 全面板提交缓冲拦截（搜索模式，Route X） =================
+       符号面板/数字/其他输入法经 InputConnection.commitText 上屏，绕开了拼音 pickSuggestion
+       拦截点；故 Hook 提交落点 com.sogou.bu.basic.ic.u 的 commitText(CharSequence,int) 与
+       ic.g 接口同名方法 c(CharSequence,int)（二者最终都抵达真实 InputConnection）。
+       beforeHookedMethod 中处于搜索态则把字符累积进缓冲区并 setResult(true) 吞掉上屏，
+       使任意面板输入都能作为搜索关键词累积，等待「完成」按钮（CandidateViewHooks）应用。
+       非搜索态完全放行（不影响正常上屏）。 */
+    private static void hookCommitBuffer(ClassLoader cl) {
+        XC_MethodHook bufferHook = new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                try {
+                    if (!ModuleState.isSearchMode()) {
+                        return; // 正常输入放行
+                    }
+                    CharSequence cs = (CharSequence) param.args[0];
+                    if (cs != null && cs.length() > 0) {
+                        ModuleState.appendSearchBuffer(cs);
+                    }
+                    // 吞掉上屏：字符留在缓冲区，不进入编辑器
+                    param.setResult(true);
+                } catch (Throwable t) {
+                    XposedBridge.log(HookUtil.LOG_TAG + "commitBuffer error: " + t);
+                }
+            }
+        };
+        HookUtil.safeHook("ic.u.commitText", () -> XposedHelpers.findAndHookMethod(CLS_IC_U, cl, "commitText", CharSequence.class, int.class, bufferHook));
+        HookUtil.safeHook("ic.u.c", () -> XposedHelpers.findAndHookMethod(CLS_IC_U, cl, "c", CharSequence.class, int.class, bufferHook));
     }
 
     /* ================= 2. 页面实例记录 ================= */
@@ -146,22 +166,46 @@ public final class SearchModeController {
         KeyboardListHooks.swapList();
     }
 
-    /** 🔍搜索：进入搜索模式 → 收起面板（露出主键盘拼音输入） */
+    /**
+     * 🔍搜索：进入搜索模式（Route X）。
+     * 收起剪贴板面板回主键盘（输入界面），用户用任意面板（拼音/符号/数字/其他输入法）输入；
+     * commitText 经 hookCommitBuffer 累积进缓冲区，「完成」按钮（画在主键盘候选条
+     * IMEInputCandidateViewContainer 上，见 InputCandidateHooks）应用关键词并退出搜索态。
+     */
     public static void onSearchClick() {
-        ModuleState.setSearchMode(true);
-        XposedBridge.log(HookUtil.LOG_TAG + "🔍 enter search mode");
-        // 收起剪贴板面板回主键盘（原版行为 w() 私有 → 反射调用）
         try {
+            ModuleState.resetSearchBuffer();
+            ModuleState.setSearchMode(true);
+            // 收起剪贴板面板回主键盘（输入界面），原版行为 w() 私有 → 反射调用
             Object page = ModuleState.page();
             if (page != null) {
                 XposedHelpers.callMethod(page, "w");
             }
+            // 清空旧关键词，列表恢复全量，等待输入累积
+            ListFilterProxy.clearKeyword();
+            KeyboardListHooks.swapList();
+            XposedBridge.log(HookUtil.LOG_TAG + "enter search mode (buffer intercept)");
         } catch (Throwable t) {
-            XposedBridge.log(HookUtil.LOG_TAG + "collapse panel error: " + t);
+            XposedBridge.log(HookUtil.LOG_TAG + "onSearchClick error: " + t);
         }
-        // 清空旧关键词，列表恢复
-        ListFilterProxy.clearKeyword();
-        KeyboardListHooks.swapList();
+    }
+
+    /**
+     * 完成：把缓冲区作为关键词应用并退出搜索态（由 CandidateViewHooks「完成」按钮命中调用）。
+     * 关键词空则恢复全量列表。
+     */
+    public static void onFinishSearch() {
+        try {
+            String keyword = ModuleState.takeSearchBuffer();
+            ModuleState.setSearchMode(false);
+            ListFilterProxy.setKeyword(keyword);
+            KeyboardListHooks.swapList();
+            reopenClipboardPage(); // 重新打开剪贴板页展示过滤结果
+            XposedBridge.log(HookUtil.LOG_TAG + "finish search: kw.len=" + keyword.length()
+                    + " filtered=" + ListFilterProxy.filteredCount());
+        } catch (Throwable t) {
+            XposedBridge.log(HookUtil.LOG_TAG + "onFinishSearch error: " + t);
+        }
     }
 
     /** 关键词确认后重新打开剪贴板页（路由方式，失败则用户手动打开，不影响功能） */

@@ -20,8 +20,17 @@ public final class ModuleState {
     private static volatile Object sKeyboard;
     /** ClipboardCandidateView 实例（drawBase 记录，计数刷新用） */
     private static volatile Object sCandidateView;
-    /** 搜索模式标志：为 true 时拼音候选被拦截为关键词，不真正上屏 */
+    /**
+     * 搜索模式标志：为 true 时所有面板（拼音/符号/数字/其他输入法）经 InputConnection.commitText
+     * 上屏的字符被统一拦截、累积进 sSearchBuffer，不真正上屏，等待「完成」按钮把缓冲区作为关键词应用。
+     * 见 SearchModeController.hookCommitBuffer 与 CandidateViewHooks 的「完成」按钮。
+     */
     private static volatile boolean sSearchMode = false;
+    /**
+     * 搜索态输入缓冲区：搜索态下所有 commitText 上屏字符累积于此，点「完成」时作为关键词应用。
+     * StringBuilder 非线程安全，IME 提交回调虽多串行于 IME 线程，仍用 synchronized 保护读写以防重入。
+     */
+    private static final StringBuilder sSearchBuffer = new StringBuilder();
     /**
      * 粘贴后置顶开关（默认开启，扩展设置页可关闭）。
      * 开启时粘贴上屏后调用宿主 ClipboardKeyboard.O(String)（宿主原生插入链路：
@@ -71,6 +80,43 @@ public final class ModuleState {
 
     public static void setSearchMode(boolean searchMode) {
         sSearchMode = searchMode;
+        if (!searchMode) {
+            // 退出搜索态：丢弃未应用的缓冲区，避免下次进入时残留旧关键词
+            resetSearchBuffer();
+        }
+    }
+
+    /** 搜索态下追加一段上屏字符到缓冲区（commitText 拦截调用） */
+    public static void appendSearchBuffer(CharSequence cs) {
+        if (cs == null) {
+            return;
+        }
+        synchronized (sSearchBuffer) {
+            sSearchBuffer.append(cs);
+        }
+    }
+
+    /** 取出并清空缓冲区（「完成」按钮应用关键词时调用） */
+    public static String takeSearchBuffer() {
+        synchronized (sSearchBuffer) {
+            String r = sSearchBuffer.toString();
+            sSearchBuffer.setLength(0);
+            return r;
+        }
+    }
+
+    /** 仅清空缓冲区（进入搜索态时调用） */
+    public static void resetSearchBuffer() {
+        synchronized (sSearchBuffer) {
+            sSearchBuffer.setLength(0);
+        }
+    }
+
+    /** 只读查看当前缓冲区（调试/诊断用） */
+    public static String peekSearchBuffer() {
+        synchronized (sSearchBuffer) {
+            return sSearchBuffer.toString();
+        }
     }
 
     public static boolean isPinRecentEnabled() {
