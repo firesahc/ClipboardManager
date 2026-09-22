@@ -42,11 +42,11 @@ public final class ClipboardLimitBypass {
     private static void hookClipboardLimit(ClassLoader cl) {
         HookUtil.safeHook("p.H", () -> XposedHelpers.findAndHookMethod(CLS_CLIP_REPO, cl, "H", CLS_CLIP_ITEM,
                 new XC_MethodHook() {
-                    private volatile Object sOldestBackup; // 单线程池串行，volatile 仅防御
+                    private static final String EXTRA_OLDEST = "clipOldest";
 
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
-                        sOldestBackup = null;
+                        param.setObjectExtra(EXTRA_OLDEST, null);
                         try {
                             Object dao = getClipboardDao();
                             if (dao == null) {
@@ -61,7 +61,7 @@ public final class ClipboardLimitBypass {
                             Object qbAsc = XposedHelpers.callMethod(qb, "orderAsc", timeProp);
                             List<?> all = (List<?>) XposedHelpers.callMethod(qbAsc, "list");
                             if (all != null && !all.isEmpty()) {
-                                sOldestBackup = all.get(0);
+                                param.setObjectExtra(EXTRA_OLDEST, all.get(0));
                             }
                         } catch (Throwable t) {
                             XposedBridge.log(HookUtil.LOG_TAG + "backup oldest failed: " + t);
@@ -70,8 +70,8 @@ public final class ClipboardLimitBypass {
 
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
-                        Object backup = sOldestBackup;
-                        sOldestBackup = null;
+                        Object backup = param.getObjectExtra(EXTRA_OLDEST);
+                        param.setObjectExtra(EXTRA_OLDEST, null);
                         if (backup == null) {
                             return;
                         }
