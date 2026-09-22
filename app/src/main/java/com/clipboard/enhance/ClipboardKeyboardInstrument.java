@@ -35,6 +35,11 @@ public final class ClipboardKeyboardInstrument {
             ClipboardLimitBypass.init(cl);
             SogouSettingsInjector.init(cl);
             XposedBridge.log(HookUtil.LOG_TAG + "all hooks installed");
+            try {
+                XposedBridge.log(HookUtil.LOG_TAG + SogouHostContract.probe(cl));
+            } catch (Throwable t) {
+                XposedBridge.log(HookUtil.LOG_TAG + "probe error: " + t);
+            }
         } catch (Throwable t) {
             XposedBridge.log(HookUtil.LOG_TAG + "init error: " + t);
         }
