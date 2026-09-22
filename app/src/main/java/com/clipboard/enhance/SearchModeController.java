@@ -5,7 +5,8 @@ import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 
 /**
- * 搜索模式领域：模式状态动作、拼音候选拦截（pickSuggestion）、页面路由、IME 生命周期清理。
+ * 搜索模式领域：模式状态动作、拼音候选拦截（pickSuggestion）、提交缓冲拦截、
+ * 搜索态剪贴板入口劫持（入口即完成）、页面路由、IME 生命周期清理。
  *
  * 逆向事实：
  * - com.sohu.inputmethod.input.InputLogic.pickSuggestion(CharSequence) =
@@ -33,6 +34,12 @@ public final class SearchModeController {
      * 上屏，是 Route X 搜索态缓冲拦截的统一入口（覆盖拼音 pickSuggestion 之外的所有面板）。
      */
     private static final String CLS_IC_U = "com.sogou.bu.basic.ic.u";
+    /**
+     * 路由导航器：工具栏/更多菜单/自定义功能行/快捷入口打开剪贴板页的统一漏斗
+     * （imefuncustom.d.g() 调 getIMENavigator().c("/app/ClipboardPage")）。
+     * 搜索态下命中 ClipboardPage 路由即转为 onFinishSearch，不真正切页。
+     */
+    private static final String CLS_NAV = "com.sogou.lib.spage.a";
 
     private SearchModeController() {
     }
@@ -41,6 +48,7 @@ public final class SearchModeController {
     public static void init(ClassLoader cl) {
         hookCommit(cl);
         hookCommitBuffer(cl);
+        hookClipboardEntryAsFinish(cl);
         hookPageCreate(cl);
         hookImeRestart(cl);
         hookImeCollapse(cl);
@@ -88,6 +96,57 @@ public final class SearchModeController {
         };
         HookUtil.safeHook("ic.u.commitText", () -> XposedHelpers.findAndHookMethod(CLS_IC_U, cl, "commitText", CharSequence.class, int.class, bufferHook));
         HookUtil.safeHook("ic.u.c", () -> XposedHelpers.findAndHookMethod(CLS_IC_U, cl, "c", CharSequence.class, int.class, bufferHook));
+    }
+
+    /* ================= 1c. 搜索态剪贴板入口劫持为「完成」（Route X） =================
+       宿主事实：所有「打开剪贴板页」入口（工具栏图标/更多菜单/自定义功能行/快捷入口）
+       最终漏斗到路由导航器 spage.a.c(String)/d(String,Bundle) 或静态路由
+       BaseSPage.F(String,Bundle)。搜索态下命中 ClipboardPage 路由则转为
+       onFinishSearch() 并吞掉，不真正切页；首候选卡 e3 走上屏提交（由 hookCommitBuffer
+       兜住），不在此拦截。非搜索态完全放行。
+       无重入：onFinishSearch 先 setSearchMode(false) 才 reopen，自触发路由天然放行。 */
+    private static void hookClipboardEntryAsFinish(ClassLoader cl) {
+        XC_MethodHook navHook = new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                try {
+                    if (!ModuleState.isSearchMode()) {
+                        return; // 正常入口放行
+                    }
+                    Object route = param.args.length > 0 ? param.args[0] : null;
+                    if (route instanceof String && ((String) route).contains("ClipboardPage")) {
+                        SearchModeController.onFinishSearch();
+                        // c/d 返回 Object：调用方实测忽略返回值（d.g 丢弃），置 null 吞掉；
+                        // 若某链路因此 NPE，降级为不吞只调 onFinishSearch（原生打开会被随后
+                        // 的过滤重开覆盖，终态一致）。
+                        param.setResult(null);
+                    }
+                } catch (Throwable t) {
+                    XposedBridge.log(HookUtil.LOG_TAG + "entryAsFinish error: " + t);
+                }
+            }
+        };
+        XC_MethodHook pageHook = new XC_MethodHook() {
+            @Override
+            protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                try {
+                    if (!ModuleState.isSearchMode()) {
+                        return;
+                    }
+                    Object route = param.args.length > 0 ? param.args[0] : null;
+                    if (route instanceof String && ((String) route).contains("ClipboardPage")) {
+                        SearchModeController.onFinishSearch();
+                        // F 返回 boolean：true 表已处理，安全吞掉
+                        param.setResult(true);
+                    }
+                } catch (Throwable t) {
+                    XposedBridge.log(HookUtil.LOG_TAG + "entryAsFinish error: " + t);
+                }
+            }
+        };
+        HookUtil.safeHook("spage.c-as-finish", () -> XposedHelpers.findAndHookMethod(CLS_NAV, cl, "c", String.class, navHook));
+        HookUtil.safeHook("spage.d-as-finish", () -> XposedHelpers.findAndHookMethod(CLS_NAV, cl, "d", String.class, android.os.Bundle.class, navHook));
+        HookUtil.safeHook("BaseSPage.F-as-finish", () -> XposedHelpers.findAndHookMethod(CLS_PAGE_BASE, cl, "F", String.class, android.os.Bundle.class, pageHook));
     }
 
     /* ================= 2. 页面实例记录 ================= */
@@ -170,8 +229,8 @@ public final class SearchModeController {
     /**
      * 🔍搜索：进入搜索模式（Route X）。
      * 收起剪贴板面板回主键盘（输入界面），用户用任意面板（拼音/符号/数字/其他输入法）输入；
-     * commitText 经 hookCommitBuffer 累积进缓冲区，「完成」按钮（画在主键盘候选条
-     * IMEInputCandidateViewContainer 上，见 InputCandidateHooks）应用关键词并退出搜索态。
+     * commitText 经 hookCommitBuffer 累积进缓冲区；搜索态下点任意剪贴板入口
+     * （工具栏/更多菜单/快捷入口，经 hookClipboardEntryAsFinish 劫持）即应用关键词并退出搜索态。
      */
     public static void onSearchClick() {
         try {
@@ -192,7 +251,8 @@ public final class SearchModeController {
     }
 
     /**
-     * 完成：把缓冲区作为关键词应用并退出搜索态（由 CandidateViewHooks「完成」按钮命中调用）。
+     * 完成：把缓冲区作为关键词应用并退出搜索态（由搜索态剪贴板入口劫持
+     * hookClipboardEntryAsFinish 调用：搜索态下点任意剪贴板入口即完成）。
      * 关键词空则恢复全量列表。
      */
     public static void onFinishSearch() {

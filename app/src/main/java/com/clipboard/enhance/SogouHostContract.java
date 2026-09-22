@@ -9,7 +9,7 @@ package com.clipboard.enhance;
  * 契约分组 ↔ 领域类：
  * - CLIPBOARD_* ↔ KeyboardListHooks / CandidateViewHooks / ClipboardLimitBypass
  * - INPUT_* ↔ SearchModeController（Route X缓冲拦截）
- * - CANDIDATE_CONTAINER ↔ InputCandidateHooks
+ * - PAGE_BASE 与 ROUTE_NAV ↔ SearchModeController（搜索态入口劫持为完成）
  */
 public final class SogouHostContract {
 
@@ -41,19 +41,20 @@ public final class SogouHostContract {
     public static final String PAGE_CLIPBOARD = "com.sohu.inputmethod.main.page.ClipboardPage";
     public static final String PAGE_BASE = "com.sohu.inputmethod.main.page.base.BaseSPage";
     public static final String IME_SOGOU = "com.sohu.inputmethod.sogou.SogouIME";
-    public static final String CANDIDATE_CONTAINER = "com.sohu.inputmethod.main.view.IMEInputCandidateViewContainer";
+    /** 路由导航器：搜索态入口劫持为完成的统一漏斗（工具栏/更多菜单/自定义行） */
+    public static final String ROUTE_NAV = "com.sogou.lib.spage.a";
 
     /** 启动诊断：逐项探测类存在性，输出能力矩阵（成功≠行为兼容，失败=对应功能禁用） */
     public static String probe(ClassLoader cl) {
         String[] names = {
                 CLIPBOARD_KEYBOARD, CLIPBOARD_ADAPTER, CLIPBOARD_VIEW_MODEL,
                 CLIPBOARD_REPO, CLIPBOARD_CANDIDATE_VIEW,
-                INPUT_LOGIC, INPUT_IC_U, PAGE_CLIPBOARD, CANDIDATE_CONTAINER,
+                INPUT_LOGIC, INPUT_IC_U, PAGE_CLIPBOARD, ROUTE_NAV,
         };
         String[] labels = {
                 "Keyboard", "Adapter", "ViewModel",
                 "Repo(p.H)", "CandidateView",
-                "InputLogic", "ic.u", "ClipboardPage", "InputCandidateContainer",
+                "InputLogic", "ic.u", "ClipboardPage", "spageNav",
         };
         StringBuilder sb = new StringBuilder("Host capabilities:");
         for (int i = 0; i < names.length; i++) {

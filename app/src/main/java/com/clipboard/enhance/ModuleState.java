@@ -24,8 +24,9 @@ public final class ModuleState {
     private static volatile WeakReference<Object> sCandidateViewRef;
     /**
      * 搜索模式标志：为 true 时所有面板（拼音/符号/数字/其他输入法）经 InputConnection.commitText
-     * 上屏的字符被统一拦截、累积进 sSearchBuffer，不真正上屏，等待「完成」按钮把缓冲区作为关键词应用。
-     * 见 SearchModeController.hookCommitBuffer 与 CandidateViewHooks 的「完成」按钮。
+     * 上屏的字符被统一拦截、累积进 sSearchBuffer，不真正上屏；搜索态下点任意剪贴板入口
+     * 即把缓冲区作为关键词应用（见 SearchModeController.hookCommitBuffer
+     * 与 hookClipboardEntryAsFinish）。
      */
     private static volatile boolean sSearchMode = false;
     /**

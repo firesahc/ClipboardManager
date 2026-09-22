@@ -9,8 +9,7 @@ import de.robv.android.xposed.XposedBridge;
  * - {@link CandidateViewHooks}：ClipboardCandidateView 绘制/触摸/计数/取消退出
  * - {@link KeyboardListHooks}：ClipboardKeyboard 列表写回/上屏置顶/全选范围/删除保护
  * - {@link PasteCountHooks}：列表项粘贴次数（右上角蓝色）绘制
- * - {@link SearchModeController}：搜索模式拦截/页面路由/IME 生命周期清理
- * - {@link InputCandidateHooks}：搜索态「完成」按钮（画在主键盘候选条 IMEInputCandidateViewContainer）
+ * - {@link SearchModeController}：搜索模式拦截/入口劫持完成/页面路由/IME 生命周期清理
  * - {@link ClipboardLimitBypass}：150 条上限绕过
  * - {@link SogouSettingsInjector}：设置页注入
  *
@@ -31,7 +30,6 @@ public final class ClipboardKeyboardInstrument {
             KeyboardListHooks.init(cl);
             PasteCountHooks.init(cl);
             SearchModeController.init(cl);
-            InputCandidateHooks.init(cl);
             ClipboardLimitBypass.init(cl);
             SogouSettingsInjector.init(cl);
             XposedBridge.log(HookUtil.LOG_TAG + "all hooks installed");
