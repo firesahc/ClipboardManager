@@ -40,9 +40,8 @@ public final class InputCandidateHooks {
     private static final int FALLBACK_BTN_COLOR = 0xFF9F9B95;
     private static final String LABEL_DONE = "完成";
 
-    /** 完成按钮矩形（随 dispatchDraw 每次更新，供 dispatchTouchEvent 命中） */
-    private static final Rect sDoneRect = new Rect();
-    private static volatile boolean sDoneRectValid = false;
+    /** 完成按钮矩形快照（写时整体替换、读时一次快照；null=无效/隐藏） */
+    private static volatile Rect sDoneRect = null;
 
     private InputCandidateHooks() {
     }
@@ -61,7 +60,7 @@ public final class InputCandidateHooks {
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         try {
                             if (!ModuleState.isSearchMode()) {
-                                sDoneRectValid = false;
+                                sDoneRect = null;
                                 return;
                             }
                             View view = (View) param.thisObject;
@@ -78,7 +77,7 @@ public final class InputCandidateHooks {
         int w = view.getWidth();
         int h = view.getHeight();
         if (w <= 0 || h <= 0) {
-            sDoneRectValid = false;
+            sDoneRect = null;
             return;
         }
         Paint paint = modulePaint(view);
@@ -100,8 +99,7 @@ public final class InputCandidateHooks {
         float baseY = h / 2f - (paint.descent() + paint.ascent()) / 2f;
         float pad = buttonTextSize(paint) * BTN_PAD_FACTOR;
         canvas.drawText(LABEL_DONE, left + pad / 2f, baseY, paint);
-        sDoneRect.set(left, 0, right, h);
-        sDoneRectValid = true;
+        sDoneRect = new Rect(left, 0, right, h);
     }
 
     /* ================= 2. 候选条触摸命中「完成」 ================= */
@@ -111,13 +109,17 @@ public final class InputCandidateHooks {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                         try {
-                            if (!ModuleState.isSearchMode() || !sDoneRectValid) {
+                            if (!ModuleState.isSearchMode()) {
+                                return;
+                            }
+                            Rect doneHit = sDoneRect;
+                            if (doneHit == null) {
                                 return;
                             }
                             MotionEvent ev = (MotionEvent) param.args[0];
                             int x = Math.round(ev.getX());
                             int y = Math.round(ev.getY());
-                            if (sDoneRect.contains(x, y)) {
+                            if (doneHit.contains(x, y)) {
                                 SearchModeController.onFinishSearch();
                                 param.setResult(true); // 消费事件，屏蔽原生处理
                             }

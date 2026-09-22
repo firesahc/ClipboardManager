@@ -51,11 +51,9 @@ public final class CandidateViewHooks {
     private static final String LABEL_ALL = "全部";
     private static final String LABEL_COMMIT_ALL = "输入全部";
 
-    /** 模块按钮矩形（随 drawBase 每次更新，供 touchInButton 命中） */
-    private static final Rect sSearchRect = new Rect();
-    private static final Rect sCommitAllRect = new Rect();
-    private static volatile boolean sSearchRectValid = false;
-    private static volatile boolean sCommitAllRectValid = false;
+    /** 模块按钮矩形快照（写时整体替换、读时一次快照：绘制线程写/触摸线程读，避免Rect原地修改竞态；null=无效/隐藏） */
+    private static volatile Rect sSearchRect = null;
+    private static volatile Rect sCommitAllRect = null;
     /** 触摸去抖状态：记录上次动作的时间与坐标 */
     private static volatile long sLastTouchTime = 0L;
     private static volatile float sLastTouchX = 0f;
@@ -109,13 +107,12 @@ public final class CandidateViewHooks {
             float btnW = textButtonWidth(paint, label);
             int left = (int) (nativeBtn.left - BTN_GAP_PX - btnW);
             if (overlapsNative(nativeBtn, left, btnW)) {
-                sSearchRectValid = false; // 位置异常：宁可隐藏按钮也不与原生文字重叠
+                sSearchRect = null; // 位置异常：宁可隐藏按钮也不与原生文字重叠
                 return;
             }
             Rect hit = drawTextButton(view, canvas, paint, label, left, h, false);
-            sSearchRect.set(hit);
-            sSearchRectValid = true;
-            sCommitAllRectValid = false; // 非整理态无此按钮
+            sSearchRect = new Rect(hit);
+            sCommitAllRect = null; // 非整理态无此按钮
         } else {
             // ---- 整理态：「输入全部(N)」画在「删除」(mClearButtonWholeRect) 左侧 ----
             Rect deleteRect = nativeButtonRect(view, null, "mClearButtonWholeRect");
@@ -133,13 +130,12 @@ public final class CandidateViewHooks {
             Rect allBtn = nativeButtonRect(view, null, "mAllBtnRect");
             Rect finishBtn = nativeButtonRect(view, null, "mFinishBtnRect");
             if (overlapsNative(allBtn, left, btnW) || overlapsNative(finishBtn, left, btnW)) {
-                sCommitAllRectValid = false;
+                sCommitAllRect = null;
                 return;
             }
             Rect hit = drawTextButton(view, canvas, paint, label, left, h, true);
-            sCommitAllRect.set(hit);
-            sCommitAllRectValid = true;
-            sSearchRectValid = false;
+            sCommitAllRect = new Rect(hit);
+            sSearchRect = null;
         }
     }
 
@@ -241,7 +237,8 @@ public final class CandidateViewHooks {
                             boolean selecting = isSelecting(view);
                             int x = Math.round((Float) param.args[0]);
                             int y = Math.round((Float) param.args[1]);
-                            if (!selecting && sSearchRectValid && sSearchRect.contains(x, y)) {
+                            Rect searchHit = sSearchRect;
+                            if (!selecting && searchHit != null && searchHit.contains(x, y)) {
                                 // 去抖：DOWN/UP 事件序列会连续两次命中，只执行第一次
                                 if (debounceTouch(x, y)) {
                                     // 筛选生效中 → 清除筛选（「全部」）；否则进入搜索模式
@@ -254,11 +251,14 @@ public final class CandidateViewHooks {
                                 param.setResult(HIT_SUPPRESSED); // 屏蔽原生命中
                                 return;
                             }
-                            if (selecting && sCommitAllRectValid && sCommitAllRect.contains(x, y)) {
-                                if (debounceTouch(x, y)) {
-                                    onCommitAllClick();
+                            if (selecting) {
+                                Rect commitHit = sCommitAllRect;
+                                if (commitHit != null && commitHit.contains(x, y)) {
+                                    if (debounceTouch(x, y)) {
+                                        onCommitAllClick();
+                                    }
+                                    param.setResult(HIT_SUPPRESSED);
                                 }
-                                param.setResult(HIT_SUPPRESSED);
                             }
                         } catch (Throwable t) {
                             XposedBridge.log(HookUtil.LOG_TAG + "touchInButton error: " + t);
