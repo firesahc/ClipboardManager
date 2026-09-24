@@ -79,6 +79,31 @@ public final class KeyboardListHooks {
                 }));
     }
 
+    /**
+     * 计数对账：onChanged 全量上报后清掉已删条目的孤儿计数，防止 SP 文件无界增长。
+     * 条目文本取 c 对象 d 字段（与上屏读取同源），取不到则跳过。
+     */
+    private static void pruneOrphanCounts(List<Object> full) {
+        try {
+            if (full == null) {
+                return;
+            }
+            List<String> contents = new ArrayList<>(full.size());
+            for (Object item : full) {
+                try {
+                    Object text = XposedHelpers.getObjectField(item, "d");
+                    if (text != null) {
+                        contents.add(String.valueOf(text));
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+            PasteCounter.prune(contents);
+        } catch (Throwable t) {
+            XposedBridge.log(HookUtil.LOG_TAG + "prune counts error: " + t);
+        }
+    }
+
     /** 将过滤结果写回 M 字段 + adapter.j，并尝试刷新 */
     public static void swapList() {
         try {

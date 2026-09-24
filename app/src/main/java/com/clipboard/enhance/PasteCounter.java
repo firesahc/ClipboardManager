@@ -89,6 +89,49 @@ public final class PasteCounter {
     }
 
     /** 取某内容的粘贴次数（未记录返回 0，无锁读） */
+    /**
+     * 对账剪除：只保留现存条目的计数，已删条目的孤儿记录从内存和 SP 一并清除。
+     * 由 onChanged 全量上报后调用（唯一漏斗）；筛选态下传全量，不误删被过滤隐藏的项。
+     * 老版本无前缀 key 一并清除（迁移残留）。
+     */
+    public static void prune(java.util.Collection<String> aliveContents) {
+        ensureInit();
+        if (aliveContents == null) {
+            return;
+        }
+        java.util.Set<String> alive = new java.util.HashSet<>(aliveContents.size() * 2 + 1);
+        for (String c : aliveContents) {
+            if (c != null) {
+                alive.add(mapKey(c));
+            }
+        }
+        java.util.List<String> orphans = new java.util.ArrayList<>();
+        for (String k : sCounts.keySet()) {
+            if (!alive.contains(k)) {
+                orphans.add(k);
+            }
+        }
+        if (orphans.isEmpty()) {
+            return;
+        }
+        for (String k : orphans) {
+            sCounts.remove(k);
+        }
+        SharedPreferences sp = sSp;
+        if (sp != null) {
+            try {
+                SharedPreferences.Editor ed = sp.edit();
+                for (String k : orphans) {
+                    ed.remove(KEY_PREFIX + k);
+                    ed.remove(k);
+                }
+                ed.apply();
+            } catch (Throwable t) {
+                XposedBridge.log(HookUtil.LOG_TAG + "paste counter prune error: " + t);
+            }
+        }
+    }
+
     public static int getCount(String content) {
         ensureInit();
         if (TextUtils.isEmpty(content)) {
