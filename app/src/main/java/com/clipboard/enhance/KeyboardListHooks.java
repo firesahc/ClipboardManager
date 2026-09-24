@@ -66,13 +66,12 @@ public final class KeyboardListHooks {
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         try {
                             ModuleState.setKeyboard(param.thisObject);
-                            if (param.thisObject instanceof Context) {
-                                PasteCounter.init((Context) param.thisObject);
-                            }
+                            PasteCounter.init();
                             @SuppressWarnings("unchecked")
                             List<Object> full = (List<Object>) param.args[0];
                             ListFilterProxy.onListChanged(full);
                             swapList();
+                            pruneOrphanCounts(full);
                         } catch (Throwable t) {
                             XposedBridge.log(HookUtil.LOG_TAG + "onChanged error: " + t);
                         }

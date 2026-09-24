@@ -38,12 +38,17 @@ public final class PasteCounter {
     }
 
     /** 显式初始化：由宿主实例就绪方传入Context，避免经全局状态暗取（首选入口） */
-    public static void init(Context ctx) {
-        if (sLoaded || ctx == null) {
+    public static void init() {
+        if (sLoaded) {
             return;
         }
         synchronized (PasteCounter.class) {
             if (sLoaded) {
+                return;
+            }
+            Context ctx = SogouSettingsInjector.globalContext();
+            if (ctx == null) {
+                XposedBridge.log(HookUtil.LOG_TAG + "paste counter init: no host context, retry later");
                 return;
             }
             loadFrom(ctx.getSharedPreferences(SP_NAME, Context.MODE_PRIVATE));
@@ -55,10 +60,7 @@ public final class PasteCounter {
         if (sLoaded) {
             return;
         }
-        Object kb = ModuleState.keyboard();
-        if (kb instanceof Context) {
-            init((Context) kb);
-        }
+        init();
     }
 
     private static void loadFrom(SharedPreferences sp) {

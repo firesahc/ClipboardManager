@@ -390,7 +390,8 @@ public final class SogouSettingsInjector {
     }
 
     /** 宿主全局 Context：com.sogou.lib.common.content.b.a() */
-    private static Context globalContext() {
+    /** 宿主全局 Context（同包复用：PasteCounter 持久化初始化同源） */
+    static Context globalContext() {
         try {
             Class<?> cls = XposedHelpers.findClass(CLS_GLOBAL_CTX, sCl);
             Object ctx = XposedHelpers.callStaticMethod(cls, "a");
