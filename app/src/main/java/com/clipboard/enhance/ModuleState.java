@@ -41,6 +41,11 @@ public final class ModuleState {
      * 让宿主自主把刚粘贴的条目排到最上方；关闭时退化为原生行为（粘贴后列表不动）。
      */
     private static volatile boolean sPinRecentEnabled = true;
+    /**
+     * 滑动删除确认开关（默认开启，扩展设置页可关闭）。
+     * 开启时左滑条目弹原生确认框；关闭时左滑直接删除。
+     */
+    private static volatile boolean sSwipeDeleteConfirm = true;
 
     private ModuleState() {
     }
@@ -138,5 +143,13 @@ public final class ModuleState {
 
     public static void setPinRecentEnabled(boolean enabled) {
         sPinRecentEnabled = enabled;
+    }
+
+    public static boolean isSwipeDeleteConfirm() {
+        return sSwipeDeleteConfirm;
+    }
+
+    public static void setSwipeDeleteConfirm(boolean enabled) {
+        sSwipeDeleteConfirm = enabled;
     }
 }

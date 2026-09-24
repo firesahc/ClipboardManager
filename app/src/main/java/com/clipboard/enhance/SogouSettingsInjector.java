@@ -66,6 +66,10 @@ public final class SogouSettingsInjector {
     private static final String SP_KEY_PIN_RECENT = "clipboard_enhance_pin_recent";
     /** 置顶开关默认值：功能默认开启，用户可在扩展设置页关闭 */
     private static final boolean SP_DEFAULT_PIN_RECENT = true;
+    /** 滑动删除确认开关持久化 key（宿主默认 SharedPreferences） */
+    private static final String SP_KEY_SWIPE_CONFIRM = "clipboard_enhance_swipe_confirm";
+    /** 滑动删除确认默认值：默认弹窗确认，关闭后左滑直接删除 */
+    private static final boolean SP_DEFAULT_SWIPE_CONFIRM = true;
     /** 自绘 UI 文案（宿主进程无应用资源，硬编码与原生 UI 语言一致） */
     private static final String LABEL_ENTRY_TITLE = "扩展设置";
     private static final String LABEL_ENTRY_SUMMARY = "剪贴板增强扩展功能";
@@ -73,6 +77,8 @@ public final class SogouSettingsInjector {
     private static final String LABEL_BACK = "‹ 返回";
     private static final String LABEL_PIN_TITLE = "粘贴后置顶";
     private static final String LABEL_PIN_SUMMARY = "粘贴过的内容将排在列表最上方";
+    private static final String LABEL_SWIPE_TITLE = "滑动删除需确认";
+    private static final String LABEL_SWIPE_SUMMARY = "关闭后左滑条目直接删除";
     /** 自绘 UI 颜色（贴近原生设置项视觉） */
     private static final int COLOR_PAGE_BG = 0xFFF2F3F5;      // 页面背景（浅灰）
     private static final int COLOR_BACK_TEXT = 0xFF1677FF;    // 返回链接（蓝）
@@ -113,6 +119,26 @@ public final class SogouSettingsInjector {
             XposedBridge.log(HookUtil.LOG_TAG + "pin recent restored: " + enabled);
         } catch (Throwable t) {
             XposedBridge.log(HookUtil.LOG_TAG + "restore pin setting error: " + t);
+        }
+    }
+
+    /**
+     * 恢复滑动删除确认开关（IME 服务重启时调用，与 restorePinRecentSetting 并列，
+     * 见 SearchModeController.hookImeRestart）。设置页与 IME 同进程，切换后静态
+     * 状态已同步；此方法保证进程冷启动后从 SharedPreferences 恢复持久化值。
+     */
+    public static void restoreSwipeDeleteConfirmSetting() {
+        try {
+            Context ctx = globalContext();
+            if (ctx == null) {
+                return;
+            }
+            boolean enabled = PreferenceManager.getDefaultSharedPreferences(ctx)
+                    .getBoolean(SP_KEY_SWIPE_CONFIRM, SP_DEFAULT_SWIPE_CONFIRM);
+            ModuleState.setSwipeDeleteConfirm(enabled);
+            XposedBridge.log(HookUtil.LOG_TAG + "swipe confirm restored: " + enabled);
+        } catch (Throwable t) {
+            XposedBridge.log(HookUtil.LOG_TAG + "restore swipe setting error: " + t);
         }
     }
 
@@ -295,7 +321,39 @@ public final class SogouSettingsInjector {
         });
         root.addView(back);
 
-        // ---- 设置项卡片：粘贴后置顶 ----
+        // ---- 设置项卡片：粘贴后置顶 / 滑动删除确认（同一样式，见 addSwitchCard） ----
+        final SharedPreferences sp = PreferenceManager.getDefaultSharedPreferences(activity);
+        addSwitchCard(activity, root, dp8, dp16, LABEL_PIN_TITLE, LABEL_PIN_SUMMARY,
+                sp.getBoolean(SP_KEY_PIN_RECENT, SP_DEFAULT_PIN_RECENT),
+                new CompoundButton.OnCheckedChangeListener() {
+                    @Override
+                    public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+                        sp.edit().putBoolean(SP_KEY_PIN_RECENT, isChecked).apply();
+                        ModuleState.setPinRecentEnabled(isChecked);
+                        XposedBridge.log(HookUtil.LOG_TAG + "pin recent switched: " + isChecked);
+                    }
+                });
+        addSwitchCard(activity, root, dp8, dp16, LABEL_SWIPE_TITLE, LABEL_SWIPE_SUMMARY,
+                sp.getBoolean(SP_KEY_SWIPE_CONFIRM, SP_DEFAULT_SWIPE_CONFIRM),
+                new CompoundButton.OnCheckedChangeListener() {
+                    @Override
+                    public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+                        sp.edit().putBoolean(SP_KEY_SWIPE_CONFIRM, isChecked).apply();
+                        ModuleState.setSwipeDeleteConfirm(isChecked);
+                        XposedBridge.log(HookUtil.LOG_TAG + "swipe confirm switched: " + isChecked);
+                    }
+                });
+
+        return root;
+    }
+
+    /**
+     * 开关卡片 builder（白底条目 + 左侧标题/说明 + 右侧 Switch，与原生设置项视觉一致）。
+     * 置顶/滑动删除确认共用，避免两套同构 UI 代码。
+     */
+    private static void addSwitchCard(Activity activity, LinearLayout root, int dp8, int dp16,
+                                      String title, String summary, boolean checked,
+                                      CompoundButton.OnCheckedChangeListener listener) {
         LinearLayout card = new LinearLayout(activity);
         card.setOrientation(LinearLayout.HORIZONTAL);
         card.setGravity(Gravity.CENTER_VERTICAL);
@@ -313,32 +371,22 @@ public final class SogouSettingsInjector {
         card.addView(texts, textsLp);
 
         TextView name = new TextView(activity);
-        name.setText(LABEL_PIN_TITLE);
+        name.setText(title);
         name.setTextSize(16);
         name.setTextColor(COLOR_TITLE_TEXT);
         texts.addView(name);
 
         TextView desc = new TextView(activity);
-        desc.setText(LABEL_PIN_SUMMARY);
+        desc.setText(summary);
         desc.setTextSize(12);
         desc.setTextColor(COLOR_DESC_TEXT);
         desc.setPadding(0, dp8, 0, 0);
         texts.addView(desc);
 
-        final SharedPreferences sp = PreferenceManager.getDefaultSharedPreferences(activity);
         Switch sw = new Switch(activity);
-        sw.setChecked(sp.getBoolean(SP_KEY_PIN_RECENT, SP_DEFAULT_PIN_RECENT));
-        sw.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
-            @Override
-            public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
-                sp.edit().putBoolean(SP_KEY_PIN_RECENT, isChecked).apply();
-                ModuleState.setPinRecentEnabled(isChecked);
-                XposedBridge.log(HookUtil.LOG_TAG + "pin recent switched: " + isChecked);
-            }
-        });
+        sw.setChecked(checked);
+        sw.setOnCheckedChangeListener(listener);
         card.addView(sw);
-
-        return root;
     }
 
     /** 宿主全局 Context：com.sogou.lib.common.content.b.a() */
