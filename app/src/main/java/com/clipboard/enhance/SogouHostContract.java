@@ -11,6 +11,7 @@ package com.clipboard.enhance;
  * - INPUT_* ↔ SearchModeController（Route X缓冲拦截）
  * - PAGE_BASE 与 ROUTE_NAV ↔ SearchModeController（搜索态入口劫持为完成）
  * - SCROLL_CANDIDATE ↔ SearchModeController（搜索态首选高亮：f7 选中色覆盖）
+ * - FUNC_CANDIDATE_VIEW ↔ SearchModeController（搜索态工具栏剪贴板图标染色：x5 烘焙替换，id 22）
  */
 public final class SogouHostContract {
 
@@ -46,6 +47,8 @@ public final class SogouHostContract {
     public static final String ROUTE_NAV = "com.sogou.lib.spage.a";
     /** 滚动拼音候选视图：搜索态首选高亮宿主（选中色由 q2.f7 逐次重算） */
     public static final String SCROLL_CANDIDATE = "com.sohu.inputmethod.sogou.q2";
+    /** 自定义工具栏功能行：搜索态剪贴板图标染色宿主（条目身份为功能 id，剪贴板=22） */
+    public static final String FUNC_CANDIDATE_VIEW = "com.sohu.inputmethod.sogou.NewIMEFunctionCandidateView";
 
     /** 启动诊断：逐项探测类存在性，输出能力矩阵（成功≠行为兼容，失败=对应功能禁用） */
     public static String probe(ClassLoader cl) {
@@ -53,13 +56,13 @@ public final class SogouHostContract {
                 CLIPBOARD_KEYBOARD, CLIPBOARD_ADAPTER, CLIPBOARD_VIEW_MODEL,
                 CLIPBOARD_REPO, CLIPBOARD_CANDIDATE_VIEW,
                 INPUT_LOGIC, INPUT_IC_U, PAGE_CLIPBOARD, ROUTE_NAV,
-                SCROLL_CANDIDATE,
+                SCROLL_CANDIDATE, FUNC_CANDIDATE_VIEW,
         };
         String[] labels = {
                 "Keyboard", "Adapter", "ViewModel",
                 "Repo(p.H)", "CandidateView",
                 "InputLogic", "ic.u", "ClipboardPage", "spageNav",
-                "ScrollCand",
+                "ScrollCand", "FuncCand",
         };
         StringBuilder sb = new StringBuilder("Host capabilities:");
         for (int i = 0; i < names.length; i++) {

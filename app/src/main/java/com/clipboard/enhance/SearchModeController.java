@@ -48,6 +48,15 @@ public final class SearchModeController {
     private static final String CLS_SCROLL_CAND = "com.sohu.inputmethod.sogou.q2";
     /** 搜索态完成标识色：完成绿；常量集中一处，真机浅色/深色皮肤验证后可调 */
     private static final int SEARCH_DONE_HIGHLIGHT = 0xFF16A34A;
+    /**
+     * 自定义工具栏功能行：NewIMEFunctionCandidateView 按条目自绘图标，
+     * 条目身份为功能 id（剪贴板 = 22，d.e 的 packed-switch key 22 → d.g() 实锤；
+     * kb_54 仅统计串）。图标由 u5→x5 绘制且 x5 末参即功能 id（u5 内 v12=model.f），
+     * x5 体内按主题重设 ColorFilter，故用烘焙位图替换（见 bakeTintedIcon）。
+     */
+    private static final String CLS_FUNC_CAND = "com.sohu.inputmethod.sogou.NewIMEFunctionCandidateView";
+    /** 剪贴板功能 id：自定义工具栏条目 f$a.f，双解释判定据此识别剪贴板图标 */
+    private static final int FUNC_ID_CLIPBOARD = 22;
 
     private SearchModeController() {
     }
@@ -58,6 +67,7 @@ public final class SearchModeController {
         hookCommitBuffer(cl);
         hookClipboardEntryAsFinish(cl);
         hookSearchHighlight(cl);
+        hookToolbarClipboardTint(cl);
         hookPageCreate(cl);
         hookImeRestart(cl);
         hookImeCollapse(cl);
@@ -175,6 +185,98 @@ public final class SearchModeController {
                 }));
     }
 
+    /* ================= 1e. 搜索态自定义工具栏剪贴板图标染色（Route X 常驻标识） =================
+       宿主事实：行内图标由 u5→x5 绘制，x5 末参即功能 id（u5 内 v12=model.f），命中 id==22；
+       x5 体内经 ui.c.g()/y() 按主题重设 ColorFilter，故绘制前置 filter 会被覆盖，
+       改为烘焙替换：首命中把原图标烘成绿色位图并缓存，会话内复用，原对象零触碰。
+       非搜索态守卫直接放行，零行为变化。 */
+    /** 会话缓存的烘焙绿图标（首命中烘焙，onSearchClick 清空；只读复用，无需恢复） */
+    private static volatile android.graphics.drawable.Drawable sBakedIcon;
+
+    private static void hookToolbarClipboardTint(ClassLoader cl) {
+        HookUtil.safeHook("funcClipboard.icon", () -> XposedHelpers.findAndHookMethod(CLS_FUNC_CAND, cl, "x5", android.graphics.Canvas.class, android.graphics.drawable.Drawable.class, android.graphics.Rect.class, boolean.class, int.class,
+                new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        try {
+                            if (!ModuleState.isSearchMode()) {
+                                return;
+                            }
+                            Object idObj = param.args[4];
+                            if (!(idObj instanceof Integer) || ((Integer) idObj) != FUNC_ID_CLIPBOARD) {
+                                return;
+                            }
+                            Object drawableObj = param.args[1];
+                            if (!(drawableObj instanceof android.graphics.drawable.Drawable)) {
+                                return;
+                            }
+                            android.graphics.drawable.Drawable baked = sBakedIcon;
+                            if (baked == null) {
+                                baked = bakeTintedIcon((android.graphics.drawable.Drawable) drawableObj);
+                                if (baked != null) {
+                                    sBakedIcon = baked;
+                                }
+                            }
+                            if (baked != null) {
+                                param.args[1] = baked;
+                            }
+                        } catch (Throwable t) {
+                            XposedBridge.log(HookUtil.LOG_TAG + "funcClipboard icon error: " + t);
+                        }
+                    }
+                }));
+    }
+
+    /** 把原图标烘焙为绿色位图：像素级带绿；原对象 bounds/filter 原样恢复 */
+    private static android.graphics.drawable.Drawable bakeTintedIcon(android.graphics.drawable.Drawable orig) {
+        android.graphics.Rect savedBounds = null;
+        boolean filtered = false;
+        try {
+            int w = orig.getIntrinsicWidth();
+            int h = orig.getIntrinsicHeight();
+            if (w <= 0 || h <= 0 || w > 512 || h > 512) {
+                return null;
+            }
+            try {
+                savedBounds = new android.graphics.Rect(orig.copyBounds());
+            } catch (Throwable ignored) {
+            }
+            android.graphics.Bitmap bmp = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888);
+            android.graphics.Canvas canvas = new android.graphics.Canvas(bmp);
+            orig.setBounds(0, 0, w, h);
+            orig.setColorFilter(SEARCH_DONE_HIGHLIGHT, android.graphics.PorterDuff.Mode.SRC_ATOP);
+            filtered = true;
+            orig.draw(canvas);
+            // 功能行宿主是虚拟组件而非 View，位图密度直接取系统 Resources
+            // （仅影响缩放基准，x5 会重设 bounds）；取不到则放弃本次染色
+            android.content.res.Resources res;
+            try {
+                res = android.content.res.Resources.getSystem();
+            } catch (Throwable t) {
+                XposedBridge.log(HookUtil.LOG_TAG + "bake icon error: " + t);
+                return null;
+            }
+            if (res == null) {
+                return null;
+            }
+            return new android.graphics.drawable.BitmapDrawable(res, bmp);
+        } catch (Throwable t) {
+            XposedBridge.log(HookUtil.LOG_TAG + "bake icon error: " + t);
+            return null;
+        } finally {
+            try {
+                if (filtered) {
+                    orig.clearColorFilter();
+                }
+                if (savedBounds != null) {
+                    orig.setBounds(savedBounds);
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+
     /* ================= 2. 页面实例记录 ================= */
     private static void hookPageCreate(ClassLoader cl) {
         HookUtil.safeHook("page.M", () -> XposedHelpers.findAndHookMethod(CLS_PAGE, cl, "M",
@@ -262,6 +364,7 @@ public final class SearchModeController {
     public static void onSearchClick() {
         try {
             ModuleState.resetSearchBuffer();
+            sBakedIcon = null;
             ModuleState.setSearchMode(true);
             // 收起剪贴板面板回主键盘（输入界面），原版行为 w() 私有 → 反射调用
             Object page = ModuleState.page();
