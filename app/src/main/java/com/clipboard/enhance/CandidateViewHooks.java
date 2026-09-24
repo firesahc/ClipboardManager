@@ -68,6 +68,7 @@ public final class CandidateViewHooks {
         hookCandidateTouch(cl);
         hookCandidateCount(cl);
         hookExitSelecting(cl);
+        hookSelectingProbe(cl);
     }
 
     /* ================= 1. drawBase 后置绘制模块按钮 ================= */
@@ -284,6 +285,7 @@ public final class CandidateViewHooks {
                             int count = (Integer) param.args[0];
                             if (count <= 0 && isSelecting((View) param.thisObject)) {
                                 XposedHelpers.callMethod(param.thisObject, "setSelecting", false);
+                                resetAdapterSwitch();
                                 XposedBridge.log(HookUtil.LOG_TAG + "auto exit selecting: list empty after delete");
                             }
                         } catch (Throwable t) {
@@ -291,6 +293,21 @@ public final class CandidateViewHooks {
                         }
                     }
                 }));
+    }
+
+    /**
+     * 复位 adapter 整理开关（b.o=false）：与 setSelecting(false) 配对，
+     * 使显示位/开关位与原生正常退出终态一致。不清勾选。
+     */
+    private static void resetAdapterSwitch() {
+        try {
+            Object adapter = clipboardAdapter();
+            if (adapter != null) {
+                XposedHelpers.callMethod(adapter, "n", false);
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(HookUtil.LOG_TAG + "reset adapter switch error: " + t);
+        }
     }
 
     /* ================= 4. 取消按钮强制退出整理态 =================
@@ -312,6 +329,7 @@ public final class CandidateViewHooks {
                             Object cv = param.thisObject;
                             if (Boolean.TRUE.equals(XposedHelpers.callMethod(cv, "isSelecting"))) {
                                 XposedHelpers.callMethod(cv, "setSelecting", false);
+                                resetAdapterSwitch();
                                 XposedBridge.log(HookUtil.LOG_TAG + "cancel: native exit missed, forced setSelecting(false)");
                             }
                         } catch (Throwable t) {
@@ -327,6 +345,39 @@ public final class CandidateViewHooks {
      * 触摸去抖：同一点（±TOUCH_DEBOUNCE_DIST_PX）TOUCH_DEBOUNCE_MS 内的重复事件
      * （DOWN/UP 序列）返回 false，只允许第一次命中执行动作，后续事件仅屏蔽不执行。
      */
+    /* ============ 诊断探针：整理态三位一致性（验证后可删） ============
+       复现偶发切换混乱时看序列定罪：
+       - cancel 后有 f.n(false) 但无 setSelecting(false) → f.n 守卫吞没实锤
+       - 矫正日志后开关仍 true → 分裂未修复（读 kb.o() done 行的 v()） */
+    private static void hookSelectingProbe(ClassLoader cl) {
+        HookUtil.safeHook("probe.f.n", () -> XposedHelpers.findAndHookMethod("com.sohu.inputmethod.main.manager.f", cl, "n", boolean.class,
+                new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        XposedBridge.log(HookUtil.LOG_TAG + "probe f.n(z=" + param.args[0] + ")");
+                    }
+                }));
+        HookUtil.safeHook("probe.kb.o", () -> XposedHelpers.findAndHookMethod("com.sohu.inputmethod.clipboard.ClipboardKeyboard", cl, "o",
+                new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        try {
+                            Object v = XposedHelpers.callMethod(param.thisObject, "v");
+                            XposedBridge.log(HookUtil.LOG_TAG + "probe kb.o() done, v()=" + v);
+                        } catch (Throwable t) {
+                            XposedBridge.log(HookUtil.LOG_TAG + "probe kb.o error: " + t);
+                        }
+                    }
+                }));
+        HookUtil.safeHook("probe.setSelecting", () -> XposedHelpers.findAndHookMethod(CLS_CANDIDATE, cl, "setSelecting", boolean.class,
+                new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
+                        XposedBridge.log(HookUtil.LOG_TAG + "probe setSelecting(z=" + param.args[0] + ")");
+                    }
+                }));
+    }
+
     private static boolean debounceTouch(float x, float y) {
         long now = SystemClock.uptimeMillis();
         if (now - sLastTouchTime < TOUCH_DEBOUNCE_MS
