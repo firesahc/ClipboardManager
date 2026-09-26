@@ -475,14 +475,9 @@ public final class ClipboardBackupManager {
             return null;
         }
         try {
-            Class<?> props = XposedHelpers.findClass(
-                    SogouHostContract.CLIPBOARD_DAO_PROPS, ModuleState.classLoader());
-            Object timeProp = XposedHelpers.getStaticObjectField(props, "Time");
-            Object qb = XposedHelpers.callMethod(dao, "queryBuilder");
-            Object ordered = XposedHelpers.callMethod(qb, "orderDesc", timeProp);
-            Object listObj = XposedHelpers.callMethod(ordered, "list");
-            if (!(listObj instanceof List)) {
-                return new ArrayList<>();
+            Object listObj = ClipboardRepoAccessor.queryAllOrdered(dao, false);
+            if (listObj == null) {
+                return null;
             }
             List<Entry> out = new ArrayList<>(((List<?>) listObj).size());
             for (Object o : (List<?>) listObj) {

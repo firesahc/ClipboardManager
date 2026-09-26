@@ -51,13 +51,7 @@ public final class ClipboardLimitBypass {
                                 return;
                             }
                             // 按时间升序取最旧一条（与原逻辑 orderAsc(Time).list().get(0) 一致）
-                            Object timeProp = XposedHelpers.getStaticObjectField(
-                                    XposedHelpers.findClass(
-                                            "com.sohu.inputmethod.clipboard.db.ClipboardItemDao$Properties", cl),
-                                    "Time");
-                            Object qb = XposedHelpers.callMethod(dao, "queryBuilder");
-                            Object qbAsc = XposedHelpers.callMethod(qb, "orderAsc", timeProp);
-                            List<?> all = (List<?>) XposedHelpers.callMethod(qbAsc, "list");
+                            List<?> all = ClipboardRepoAccessor.queryAllOrdered(dao, true);
                             if (all != null && !all.isEmpty()) {
                                 param.setObjectExtra(EXTRA_OLDEST, all.get(0));
                             }
