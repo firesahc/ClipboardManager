@@ -8,6 +8,7 @@ package com.clipboard.enhance;
  *
  * 契约分组 ↔ 领域类：
  * - CLIPBOARD_* ↔ KeyboardListHooks / CandidateViewHooks / ClipboardLimitBypass
+ * - FIRST_CANDIDATE_VIEW / VPA_HISTORY_SCREEN ↔ QuickPasteHooks（整条补齐口）
  * - INPUT_* ↔ SearchModeController（Route X缓冲拦截）
  * - PAGE_BASE 与 ROUTE_NAV ↔ SearchModeController（搜索态入口劫持为完成）
  * - SCROLL_CANDIDATE ↔ SearchModeController（搜索态首选高亮：f7 选中色覆盖）
@@ -27,6 +28,11 @@ public final class SogouHostContract {
     public static final String CLIPBOARD_DB_A = "com.sohu.inputmethod.clipboard.db.a";
     public static final String CLIPBOARD_DAO_PROPS = "com.sohu.inputmethod.clipboard.db.ClipboardItemDao$Properties";
     public static final String CLIPBOARD_CANDIDATE_VIEW = "com.sohu.inputmethod.clipboard.ClipboardCandidateView";
+    /** 复制后首候选快速粘贴视图：e3(MotionEvent) 经 s.b 上屏，不走 ClipboardKeyboard.a */
+    public static final String FIRST_CANDIDATE_VIEW = "com.sohu.inputmethod.sogou.ClipboardFirstCandidateView";
+    /** VPA 历史列表：a(int) 直接 u.Z().A，与主列表同漏斗不同类 */
+    public static final String VPA_HISTORY_SCREEN =
+            "com.sohu.inputmethod.clipboard.vpaclipboard.VpaClipboardHistoryScreen";
 
     /** Keyboard数据源/adapter显示列表/条目文本字段 */
     public static final String FIELD_KEYBOARD_LIST = "M";
@@ -55,12 +61,14 @@ public final class SogouHostContract {
         String[] names = {
                 CLIPBOARD_KEYBOARD, CLIPBOARD_ADAPTER, CLIPBOARD_VIEW_MODEL,
                 CLIPBOARD_REPO, CLIPBOARD_CANDIDATE_VIEW,
+                FIRST_CANDIDATE_VIEW, VPA_HISTORY_SCREEN,
                 INPUT_LOGIC, INPUT_IC_U, PAGE_CLIPBOARD, ROUTE_NAV,
                 SCROLL_CANDIDATE, FUNC_CANDIDATE_VIEW,
         };
         String[] labels = {
                 "Keyboard", "Adapter", "ViewModel",
                 "Repo(p.H)", "CandidateView",
+                "FirstCand", "VpaHist",
                 "InputLogic", "ic.u", "ClipboardPage", "spageNav",
                 "ScrollCand", "FuncCand",
         };
