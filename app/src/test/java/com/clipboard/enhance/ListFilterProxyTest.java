@@ -24,12 +24,18 @@ import java.util.List;
  */
 public class ListFilterProxyTest {
 
-    /** 模拟剪贴板条目（c 对象），仅含文本字段 d */
+    /** 模拟剪贴板条目（c 对象）：d=文本，c=时间戳，与 ListFilterProxy 反射字段名一致 */
     private static class FakeItem {
         private final String d;
+        private final long c;
 
         FakeItem(String d) {
+            this(d, 0L);
+        }
+
+        FakeItem(String d, long c) {
             this.d = d;
+            this.c = c;
         }
     }
 
@@ -37,10 +43,17 @@ public class ListFilterProxyTest {
         return new FakeItem(text);
     }
 
+    private static FakeItem item(String text, long time) {
+        return new FakeItem(text, time);
+    }
+
     @Before
     public void setUp() {
-        // 重置静态状态：清空关键词，注入空列表（等价于无列表基线）
+        // 重置静态状态：清空关键词，注入空列表（等价于无列表基线），复位排序与计数源
         ListFilterProxy.clearKeyword();
+        ListFilterProxy.setSortKey(ListFilterProxy.SortKey.TIME);
+        ListFilterProxy.setSortAsc(false);
+        ListFilterProxy.setCountProvider(null);
         ListFilterProxy.onListChanged(new ArrayList<Object>());
     }
 
@@ -225,5 +238,155 @@ public class ListFilterProxyTest {
         assertEquals(2, active.size());
         assertSame(fresh.get(0), active.get(0)); // 新复制的命中关键词仍排最前
         assertSame(fresh.get(2), active.get(1)); // 旧条目保持宿主相对顺序
+    }
+
+    /* ================= 排序策略（纯视图层，不写库） =================
+       默认时间降序 = 宿主 orderDesc(Time) 顺序，无过滤时保持引用同一；
+       其他字段/方向返回排序拷贝，sOriginal 顺序永不被改。 */
+
+    @Test
+    public void defaultSort_returnsOriginalReference() {
+        List<Object> full = Arrays.<Object>asList(item("a", 3), item("b", 1));
+        ListFilterProxy.onListChanged(full);
+
+        assertSame(full, ListFilterProxy.activeList());
+    }
+
+    @Test
+    public void sortKey_backToTimeDesc_restoresOriginalReference() {
+        List<Object> full = Arrays.<Object>asList(item("a", 3), item("b", 1));
+        ListFilterProxy.onListChanged(full);
+        ListFilterProxy.setSortKey(ListFilterProxy.SortKey.COUNT);
+        assertFalse(ListFilterProxy.activeList() == full); // 拷贝已产生
+
+        ListFilterProxy.setSortKey(ListFilterProxy.SortKey.TIME);
+        assertSame(full, ListFilterProxy.activeList()); // 回到默认即原引用
+    }
+
+    @Test
+    public void sortByCountDesc_ordersByProvider() {
+        FakeItem a = item("aaa");
+        FakeItem b = item("bbb");
+        FakeItem c = item("ccc");
+        List<Object> full = Arrays.<Object>asList(a, b, c);
+        ListFilterProxy.onListChanged(full);
+        final java.util.Map<String, Integer> counts = new java.util.HashMap<>();
+        counts.put("aaa", 5);
+        counts.put("bbb", 1);
+        counts.put("ccc", 3);
+        ListFilterProxy.setCountProvider(new ListFilterProxy.CountProvider() {
+            @Override
+            public int getCount(String content) {
+                Integer v = counts.get(content);
+                return v == null ? 0 : v;
+            }
+        });
+        ListFilterProxy.setSortKey(ListFilterProxy.SortKey.COUNT);
+
+        List<Object> active = ListFilterProxy.activeList();
+        assertEquals(3, active.size());
+        assertSame(a, active.get(0));
+        assertSame(c, active.get(1));
+        assertSame(b, active.get(2));
+        // 原列表顺序不动（排序只产生拷贝）
+        assertEquals("aaa", ((FakeItem) full.get(0)).d);
+    }
+
+    @Test
+    public void sortByCountAsc_reversesDirection() {
+        List<Object> full = Arrays.<Object>asList(item("aaa"), item("bbb"), item("ccc"));
+        ListFilterProxy.onListChanged(full);
+        final java.util.Map<String, Integer> counts = new java.util.HashMap<>();
+        counts.put("aaa", 5);
+        counts.put("bbb", 1);
+        counts.put("ccc", 3);
+        ListFilterProxy.setCountProvider(new ListFilterProxy.CountProvider() {
+            @Override
+            public int getCount(String content) {
+                Integer v = counts.get(content);
+                return v == null ? 0 : v;
+            }
+        });
+        ListFilterProxy.setSortKey(ListFilterProxy.SortKey.COUNT);
+        ListFilterProxy.setSortAsc(true);
+
+        List<Object> active = ListFilterProxy.activeList();
+        assertEquals("bbb", ((FakeItem) active.get(0)).d);
+        assertEquals("ccc", ((FakeItem) active.get(1)).d);
+        assertEquals("aaa", ((FakeItem) active.get(2)).d);
+    }
+
+    @Test
+    public void sortByLengthDesc_ordersByTextLength() {
+        FakeItem s = item("x");
+        FakeItem m = item("xxx");
+        FakeItem l = item("xxxxx");
+        ListFilterProxy.onListChanged(Arrays.<Object>asList(s, m, l));
+        ListFilterProxy.setSortKey(ListFilterProxy.SortKey.LENGTH);
+
+        List<Object> active = ListFilterProxy.activeList();
+        assertSame(l, active.get(0));
+        assertSame(m, active.get(1));
+        assertSame(s, active.get(2));
+    }
+
+    @Test
+    public void sortByTimeAsc_ordersByTimestamp() {
+        FakeItem t3 = item("t3", 300);
+        FakeItem t1 = item("t1", 100);
+        FakeItem t2 = item("t2", 200);
+        ListFilterProxy.onListChanged(Arrays.<Object>asList(t3, t1, t2));
+        ListFilterProxy.setSortAsc(true);
+
+        List<Object> active = ListFilterProxy.activeList();
+        assertSame(t1, active.get(0));
+        assertSame(t2, active.get(1));
+        assertSame(t3, active.get(2));
+    }
+
+    @Test
+    public void filter_thenSort_appliesBoth() {
+        FakeItem a = item("match-aaa", 100);
+        FakeItem b = item("other", 300);
+        FakeItem c = item("match-c", 200);
+        ListFilterProxy.onListChanged(Arrays.<Object>asList(a, b, c));
+        final java.util.Map<String, Integer> counts = new java.util.HashMap<>();
+        counts.put("match-aaa", 1);
+        counts.put("match-c", 9);
+        ListFilterProxy.setCountProvider(new ListFilterProxy.CountProvider() {
+            @Override
+            public int getCount(String content) {
+                Integer v = counts.get(content);
+                return v == null ? 0 : v;
+            }
+        });
+        ListFilterProxy.setKeyword("match");
+        ListFilterProxy.setSortKey(ListFilterProxy.SortKey.COUNT);
+
+        List<Object> active = ListFilterProxy.activeList();
+        assertEquals(2, active.size());
+        assertSame(c, active.get(0)); // 过滤命中后按热度排
+        assertSame(a, active.get(1));
+    }
+
+    @Test
+    public void cycleSortKey_rotatesTimeCountLength() {
+        assertEquals(ListFilterProxy.SortKey.TIME, ListFilterProxy.getSortKey());
+        ListFilterProxy.cycleSortKey();
+        assertEquals(ListFilterProxy.SortKey.COUNT, ListFilterProxy.getSortKey());
+        ListFilterProxy.cycleSortKey();
+        assertEquals(ListFilterProxy.SortKey.LENGTH, ListFilterProxy.getSortKey());
+        ListFilterProxy.cycleSortKey();
+        assertEquals(ListFilterProxy.SortKey.TIME, ListFilterProxy.getSortKey());
+        assertEquals("时间", ListFilterProxy.sortKeyLabel());
+        assertEquals("↓", ListFilterProxy.sortDirLabel());
+    }
+
+    @Test
+    public void toggleSortDirection_flipsAsc() {
+        assertFalse(ListFilterProxy.isSortAsc());
+        ListFilterProxy.toggleSortDirection();
+        assertTrue(ListFilterProxy.isSortAsc());
+        assertEquals("↑", ListFilterProxy.sortDirLabel());
     }
 }

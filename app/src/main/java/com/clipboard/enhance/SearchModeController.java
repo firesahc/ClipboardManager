@@ -304,6 +304,7 @@ public final class SearchModeController {
                             resetFilterState();
                             SogouSettingsInjector.restorePinRecentSetting();
                             SogouSettingsInjector.restoreSwipeDeleteConfirmSetting();
+                            SogouSettingsInjector.restoreSortSetting();
                             XposedBridge.log(HookUtil.LOG_TAG + "IME recreated, filter cleared");
                         } catch (Throwable t) {
                             XposedBridge.log(HookUtil.LOG_TAG + "ime onCreate error: " + t);

@@ -24,8 +24,6 @@ public final class ClipboardLimitBypass {
     private static final String CLS_CLIP_REPO = "com.sohu.inputmethod.clipboard.p";
     /** 剪贴板条目实体（db.c 实体的混淆名，字段 d=content、c=time） */
     private static final String CLS_CLIP_ITEM = "com.sohu.inputmethod.clipboard.c";
-    /** 数据库门面 → session → dao 链：db.a.b().a().a() */
-    private static final String CLS_DB_A = "com.sohu.inputmethod.clipboard.db.a";
 
     private ClipboardLimitBypass() {
     }
@@ -48,7 +46,7 @@ public final class ClipboardLimitBypass {
                     protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                         param.setObjectExtra(EXTRA_OLDEST, null);
                         try {
-                            Object dao = getClipboardDao();
+                            Object dao = ClipboardRepoAccessor.dao();
                             if (dao == null) {
                                 return;
                             }
@@ -76,7 +74,7 @@ public final class ClipboardLimitBypass {
                             return;
                         }
                         try {
-                            Object dao = getClipboardDao();
+                            Object dao = ClipboardRepoAccessor.dao();
                             if (dao != null) {
                                 XposedHelpers.callMethod(dao, "insertOrReplace", backup);
                             }
@@ -85,17 +83,5 @@ public final class ClipboardLimitBypass {
                         }
                     }
                 }));
-    }
-
-    /** db.a.b().a().a() → ClipboardItemDao（链式反射，任一步失败返回 null） */
-    private static Object getClipboardDao() {
-        try {
-            Class<?> dbA = XposedHelpers.findClass(CLS_DB_A, ModuleState.classLoader());
-            Object holder = XposedHelpers.callStaticMethod(dbA, "b");
-            Object session = XposedHelpers.callMethod(holder, "a");
-            return XposedHelpers.callMethod(session, "a");
-        } catch (Throwable t) {
-            return null;
-        }
     }
 }

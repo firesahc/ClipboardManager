@@ -17,15 +17,34 @@ import java.util.List;
  *   排序完全由宿主负责，本类只管搜索过滤。
  * - 本类为纯逻辑，不持有写回回调：setKeyword/clearKeyword/onListChanged 只重算
  *   sActive，写回 M/j 由调用方显式调 KeyboardListHooks.swapList()（避免隐式回调环）。
+ * - 排序同为纯视图策略：默认时间降序即宿主 orderDesc(Time) 顺序（此时无过滤不复制，
+ *   保持引用同一）；热度经 CountProvider 注入（生产接 PasteCounter，单测注入假数据），
+ *   长度/时间经反射读 d/c 字段；排序只产生新拷贝，永不改 sOriginal 顺序。
  */
 public final class ListFilterProxy {
 
-    /** 最近一次全量列表（onChanged 上报） */
+    /** 排序字段：时间 / 粘贴热度 / 内容长度（与宿主互不干扰的纯视图策略） */
+    public enum SortKey {
+        TIME, COUNT, LENGTH
+    }
+
+    /** 粘贴次数提供方（生产环境接 PasteCounter，单测注入假数据，保持本类纯逻辑） */
+    public interface CountProvider {
+        int getCount(String content);
+    }
+
+    /** 最近一次全量列表（onChanged 上报，恒为宿主时间倒序） */
     private static volatile List<Object> sOriginal;
-    /** 当前生效列表（过滤后或全量） */
+    /** 当前生效列表（过滤后或全量，可能为排序拷贝） */
     private static volatile List<Object> sActive;
     /** 当前搜索关键词（空 = 不过滤） */
     private static volatile String sKeyword = "";
+    /** 当前排序字段（默认时间，即宿主原生顺序） */
+    private static volatile SortKey sSortKey = SortKey.TIME;
+    /** 排序方向：false=降序（默认），true=升序 */
+    private static volatile boolean sSortAsc = false;
+    /** 粘贴次数提供方（null=全部按0处理，即不参与排序） */
+    private static volatile CountProvider sCountProvider;
 
     private ListFilterProxy() {
     }
@@ -56,6 +75,53 @@ public final class ListFilterProxy {
         setKeyword("");
     }
 
+    /** 当前排序字段 */
+    public static SortKey getSortKey() {
+        return sSortKey;
+    }
+
+    public static void setSortKey(SortKey key) {
+        sSortKey = key == null ? SortKey.TIME : key;
+        applyFilter();
+    }
+
+    /** 当前是否为升序（false=降序默认） */
+    public static boolean isSortAsc() {
+        return sSortAsc;
+    }
+
+    public static void setSortAsc(boolean asc) {
+        sSortAsc = asc;
+        applyFilter();
+    }
+
+    /** 候选栏点击：字段循环 时间→热度→长度→时间 */
+    public static void cycleSortKey() {
+        SortKey cur = sSortKey;
+        setSortKey(cur == SortKey.TIME ? SortKey.COUNT
+                : cur == SortKey.COUNT ? SortKey.LENGTH : SortKey.TIME);
+    }
+
+    /** 候选栏点击：翻转正倒序 */
+    public static void toggleSortDirection() {
+        setSortAsc(!sSortAsc);
+    }
+
+    public static void setCountProvider(CountProvider provider) {
+        sCountProvider = provider;
+    }
+
+    /** 排序字段文案（候选栏按钮用） */
+    public static String sortKeyLabel() {
+        SortKey k = sSortKey;
+        return k == SortKey.COUNT ? "热度" : k == SortKey.LENGTH ? "长度" : "时间";
+    }
+
+    /** 排序方向文案（候选栏按钮用）：降序↓ / 升序↑ */
+    public static String sortDirLabel() {
+        return sSortAsc ? "↑" : "↓";
+    }
+
     /** 当前应注入给原生列表的 List（全量原对象或过滤子集） */
     public static List<Object> activeList() {
         return sActive != null ? sActive : sOriginal;
@@ -77,9 +143,10 @@ public final class ListFilterProxy {
             sActive = null;
             return;
         }
+        List<Object> base;
         if (sKeyword.isEmpty()) {
-            // 无关键词：原样生效（不复制，保持引用同一性，activeList()==original）
-            sActive = src;
+            // 无关键词：宿主顺序即时间倒序，默认排序下保持引用同一（swapList 原地同步安全）
+            base = src;
         } else {
             String kw = sKeyword;
             List<Object> out = new ArrayList<>();
@@ -90,8 +157,79 @@ public final class ListFilterProxy {
                     out.add(item);
                 }
             }
-            sActive = out;
+            base = out;
         }
+        sActive = applySort(base, base == src);
+    }
+
+    /**
+     * 排序策略（纯视图层，不写库）：
+     * 默认（时间降序）且无过滤时返回原引用，保持与宿主上报顺序/引用同一；
+     * 其他情况返回排序拷贝，绝不原地重排 sOriginal（恢复全量时仍是宿主顺序）。
+     */
+    private static List<Object> applySort(List<Object> base, boolean isOriginalRef) {
+        if (sSortKey == SortKey.TIME && !sSortAsc) {
+            return base; // 宿主 orderDesc(Time) 即时间降序，原样接受
+        }
+        List<Object> sorted = new ArrayList<>(base);
+        final SortKey key = sSortKey;
+        final boolean asc = sSortAsc;
+        final CountProvider provider = sCountProvider;
+        java.util.Collections.sort(sorted, new java.util.Comparator<Object>() {
+            @Override
+            public int compare(Object a, Object b) {
+                int r;
+                if (key == SortKey.COUNT) {
+                    r = Integer.compare(countOf(a, provider), countOf(b, provider));
+                } else if (key == SortKey.LENGTH) {
+                    r = Integer.compare(lengthOf(a), lengthOf(b));
+                } else {
+                    r = Long.compare(timeOf(a), timeOf(b));
+                }
+                if (r == 0) {
+                    // 平局按时间降序兜底（新复制优先），与宿主默认观感一致
+                    r = Long.compare(timeOf(b), timeOf(a));
+                    return r;
+                }
+                return asc ? r : -r;
+            }
+        });
+        return sorted;
+    }
+
+    private static String textOf(Object item) {
+        Object text = readField(item, "d");
+        return text == null ? null : String.valueOf(text);
+    }
+
+    private static int countOf(Object item, CountProvider provider) {
+        if (provider == null) {
+            return 0;
+        }
+        try {
+            String t = textOf(item);
+            return t == null ? -1 : provider.getCount(t);
+        } catch (Throwable ignored) {
+            return -1;
+        }
+    }
+
+    private static int lengthOf(Object item) {
+        String t = textOf(item);
+        return t == null ? -1 : t.length();
+    }
+
+    private static long timeOf(Object item) {
+        try {
+            java.lang.reflect.Field f = item.getClass().getDeclaredField("c");
+            f.setAccessible(true);
+            Object v = f.get(item);
+            if (v instanceof Number) {
+                return ((Number) v).longValue();
+            }
+        } catch (Throwable ignored) {
+        }
+        return Long.MIN_VALUE; // 无时间字段的沉底
     }
 
     private static Object readField(Object obj, String name) {

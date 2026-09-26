@@ -1,10 +1,12 @@
 package com.clipboard.enhance;
 
 import android.app.Activity;
+import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
+import android.net.Uri;
 import android.os.Bundle;
 import android.preference.PreferenceManager;
 import android.view.Gravity;
@@ -70,6 +72,14 @@ public final class SogouSettingsInjector {
     private static final String SP_KEY_SWIPE_CONFIRM = "clipboard_enhance_swipe_confirm";
     /** 滑动删除确认默认值：默认弹窗确认，关闭后左滑直接删除 */
     private static final boolean SP_DEFAULT_SWIPE_CONFIRM = true;
+    /** 排序字段持久化 key（存 SortKey name，宿主默认 SharedPreferences） */
+    private static final String SP_KEY_SORT_KEY = "clipboard_enhance_sort_key";
+    /** 排序字段默认值：时间（即宿主原生顺序） */
+    private static final String SP_DEFAULT_SORT_KEY = "TIME";
+    /** 排序方向持久化 key（true=升序，false=降序） */
+    private static final String SP_KEY_SORT_ASC = "clipboard_enhance_sort_asc";
+    /** 排序方向默认值：降序（新内容/高热度在前） */
+    private static final boolean SP_DEFAULT_SORT_ASC = false;
     /** 自绘 UI 文案（宿主进程无应用资源，硬编码与原生 UI 语言一致） */
     private static final String LABEL_ENTRY_TITLE = "扩展设置";
     private static final String LABEL_ENTRY_SUMMARY = "剪贴板增强扩展功能";
@@ -79,6 +89,17 @@ public final class SogouSettingsInjector {
     private static final String LABEL_PIN_SUMMARY = "粘贴过的内容将排在列表最上方";
     private static final String LABEL_SWIPE_TITLE = "滑动删除需确认";
     private static final String LABEL_SWIPE_SUMMARY = "关闭后左滑条目直接删除";
+    private static final String LABEL_SORT_KEY_TITLE = "排序字段";
+    private static final String LABEL_SORT_KEY_SUMMARY_PREFIX = "当前：";
+    private static final String LABEL_SORT_ASC_TITLE = "排序升序";
+    private static final String LABEL_SORT_ASC_SUMMARY = "关闭为降序（新的/热度高的在前）";
+    private static final String LABEL_EXPORT_TITLE = "导出剪贴板";
+    private static final String LABEL_EXPORT_SUMMARY = "保存为 JSON 文件（自选位置）";
+    private static final String LABEL_IMPORT_TITLE = "导入剪贴板";
+    private static final String LABEL_IMPORT_SUMMARY = "合并导入，重复内容更新时间";
+    /** SAF 回执请求码（宿主无关的高位段，避开原生请求码） */
+    private static final int REQ_EXPORT = 0xE401;
+    private static final int REQ_IMPORT = 0xE402;
     /** 自绘 UI 颜色（贴近原生设置项视觉） */
     private static final int COLOR_PAGE_BG = 0xFFF2F3F5;      // 页面背景（浅灰）
     private static final int COLOR_BACK_TEXT = 0xFF1677FF;    // 返回链接（蓝）
@@ -140,6 +161,56 @@ public final class SogouSettingsInjector {
         } catch (Throwable t) {
             XposedBridge.log(HookUtil.LOG_TAG + "restore swipe setting error: " + t);
         }
+    }
+
+    /**
+     * 恢复排序设置（IME 服务重启时调用，与置顶/滑动开关并列）。
+     * 排序状态唯一归属 ListFilterProxy，此处仅从 SP 恢复后写入代理。
+     */
+    public static void restoreSortSetting() {
+        try {
+            Context ctx = globalContext();
+            if (ctx == null) {
+                return;
+            }
+            SharedPreferences sp = PreferenceManager.getDefaultSharedPreferences(ctx);
+            String keyName = sp.getString(SP_KEY_SORT_KEY, SP_DEFAULT_SORT_KEY);
+            boolean asc = sp.getBoolean(SP_KEY_SORT_ASC, SP_DEFAULT_SORT_ASC);
+            ListFilterProxy.setSortKey(parseSortKey(keyName));
+            ListFilterProxy.setSortAsc(asc);
+            XposedBridge.log(HookUtil.LOG_TAG + "sort restored: " + keyName + (asc ? "↑" : "↓"));
+        } catch (Throwable t) {
+            XposedBridge.log(HookUtil.LOG_TAG + "restore sort setting error: " + t);
+        }
+    }
+
+    /**
+     * 持久化当前排序设置（候选栏排序键/设置页切换后调用）。
+     * 只写 SP，不改代理状态（调用方已先改代理并 swapList）。
+     */
+    public static void saveSortSetting() {
+        try {
+            Context ctx = globalContext();
+            if (ctx == null) {
+                return;
+            }
+            PreferenceManager.getDefaultSharedPreferences(ctx).edit()
+                    .putString(SP_KEY_SORT_KEY, ListFilterProxy.getSortKey().name())
+                    .putBoolean(SP_KEY_SORT_ASC, ListFilterProxy.isSortAsc())
+                    .apply();
+        } catch (Throwable t) {
+            XposedBridge.log(HookUtil.LOG_TAG + "save sort setting error: " + t);
+        }
+    }
+
+    private static ListFilterProxy.SortKey parseSortKey(String name) {
+        if ("COUNT".equals(name)) {
+            return ListFilterProxy.SortKey.COUNT;
+        }
+        if ("LENGTH".equals(name)) {
+            return ListFilterProxy.SortKey.LENGTH;
+        }
+        return ListFilterProxy.SortKey.TIME;
     }
 
     /* ================= 1. 设置主页注入「扩展设置」入口 =================
@@ -247,8 +318,7 @@ public final class SogouSettingsInjector {
                         injectExtPageIfNeeded((Activity) param.thisObject);
                     }
                 }));
-        HookUtil.safeHook("ext page onNewIntent", () -> XposedHelpers.findAndHookMethod(CLS_SETTING_ACTIVITY, cl, "onNewIntent", Intent.class,
-                new XC_MethodHook() {
+        HookUtil.safeHook("ext page onNewIntent", () -> XposedHelpers.findAndHookMethod(CLS_SETTING_ACTIVITY, cl, "onNewIntent", Intent.class,                new XC_MethodHook() {
                     @Override
                     protected void beforeHookedMethod(MethodHookParam param) throws Throwable {
                         try {
@@ -264,6 +334,44 @@ public final class SogouSettingsInjector {
                     @Override
                     protected void afterHookedMethod(MethodHookParam param) throws Throwable {
                         injectExtPageIfNeeded((Activity) param.thisObject);
+                    }
+                }));
+        hookActivityResult();
+    }
+
+    /* ================= 2b. SAF 回执 =================
+       导出/导入经系统文件选择器自选位置（零权限），回执在宿主设置 Activity 上：
+       BaseSettingActivity 未声明 onActivityResult，改 hook 基类 android.app.Activity，
+       以高位请求码过滤，与宿主原生回执互不干扰。 */
+    private static void hookActivityResult() {
+        HookUtil.safeHook("activityResult", () -> XposedHelpers.findAndHookMethod(
+                Activity.class, "onActivityResult", int.class, int.class, Intent.class,
+                new XC_MethodHook() {
+                    @Override
+                    protected void afterHookedMethod(MethodHookParam param) throws Throwable {
+                        try {
+                            int requestCode = (Integer) param.args[0];
+                            if (requestCode != REQ_EXPORT && requestCode != REQ_IMPORT) {
+                                return;
+                            }
+                            int resultCode = (Integer) param.args[1];
+                            if (resultCode != Activity.RESULT_OK) {
+                                return;
+                            }
+                            Intent data = (Intent) param.args[2];
+                            if (data == null || data.getData() == null) {
+                                return;
+                            }
+                            Uri uri = data.getData();
+                            Context ctx = (Context) param.thisObject;
+                            if (requestCode == REQ_EXPORT) {
+                                ClipboardBackupManager.exportToUri(ctx, uri);
+                            } else {
+                                ClipboardBackupManager.importFromUri(ctx, uri);
+                            }
+                        } catch (Throwable t) {
+                            XposedBridge.log(HookUtil.LOG_TAG + "activityResult error: " + t);
+                        }
                     }
                 }));
     }
@@ -344,7 +452,136 @@ public final class SogouSettingsInjector {
                     }
                 });
 
+        // ---- 排序：字段行（点击循环 时间→热度→长度）+ 方向开关（升序/降序） ----
+        final TextView sortKeySummary = new TextView(activity);
+        addActionCard(activity, root, dp8, dp16, LABEL_SORT_KEY_TITLE, sortKeySummary,
+                sortSummaryText(sp),
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        ListFilterProxy.SortKey next = nextSortKey(
+                                sp.getString(SP_KEY_SORT_KEY, SP_DEFAULT_SORT_KEY));
+                        sp.edit().putString(SP_KEY_SORT_KEY, next.name()).apply();
+                        ListFilterProxy.setSortKey(next);
+                        sortKeySummary.setText(sortSummaryText(sp));
+                        KeyboardListHooks.swapList();
+                        XposedBridge.log(HookUtil.LOG_TAG + "sort key switched: " + next.name());
+                    }
+                });
+        addSwitchCard(activity, root, dp8, dp16, LABEL_SORT_ASC_TITLE, LABEL_SORT_ASC_SUMMARY,
+                sp.getBoolean(SP_KEY_SORT_ASC, SP_DEFAULT_SORT_ASC),
+                new CompoundButton.OnCheckedChangeListener() {
+                    @Override
+                    public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
+                        sp.edit().putBoolean(SP_KEY_SORT_ASC, isChecked).apply();
+                        ListFilterProxy.setSortAsc(isChecked);
+                        KeyboardListHooks.swapList();
+                        XposedBridge.log(HookUtil.LOG_TAG + "sort asc switched: " + isChecked);
+                    }
+                });
+
+        // ---- 备份恢复：SAF 自选位置导出/合并导入（后台线程，无权限需求） ----
+        final Activity hostActivity = activity;
+        addActionCard(activity, root, dp8, dp16, LABEL_EXPORT_TITLE, new TextView(activity),
+                LABEL_EXPORT_SUMMARY,
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        try {
+                            String stamp = new java.text.SimpleDateFormat("yyyyMMdd-HHmmss",
+                                    java.util.Locale.US).format(new java.util.Date());
+                            Intent it = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                            it.addCategory(Intent.CATEGORY_OPENABLE);
+                            it.setType("application/json");
+                            it.putExtra(Intent.EXTRA_TITLE, "clipboard-backup-" + stamp + ".json");
+                            hostActivity.startActivityForResult(it, REQ_EXPORT);
+                        } catch (ActivityNotFoundException e) {
+                            // 无文件选择器的降级：经 MediaStore 落 Download
+                            ClipboardBackupManager.exportToDownloadFallback(hostActivity);
+                        } catch (Throwable t) {
+                            XposedBridge.log(HookUtil.LOG_TAG + "export intent error: " + t);
+                        }
+                    }
+                });
+        addActionCard(activity, root, dp8, dp16, LABEL_IMPORT_TITLE, new TextView(activity),
+                LABEL_IMPORT_SUMMARY,
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        try {
+                            Intent it = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                            it.addCategory(Intent.CATEGORY_OPENABLE);
+                            it.setType("application/json");
+                            hostActivity.startActivityForResult(it, REQ_IMPORT);
+                        } catch (ActivityNotFoundException e) {
+                            android.widget.Toast.makeText(hostActivity, "无文件选择器，无法导入",
+                                    android.widget.Toast.LENGTH_SHORT).show();
+                        } catch (Throwable t) {
+                            XposedBridge.log(HookUtil.LOG_TAG + "import intent error: " + t);
+                        }
+                    }
+                });
+
         return root;
+    }
+
+    /** 排序字段行摘要：当前字段文案（读 SP，与代理状态同源） */
+    private static String sortSummaryText(SharedPreferences sp) {
+        ListFilterProxy.SortKey k = parseSortKey(sp.getString(SP_KEY_SORT_KEY, SP_DEFAULT_SORT_KEY));
+        String label = k == ListFilterProxy.SortKey.COUNT ? "热度"
+                : k == ListFilterProxy.SortKey.LENGTH ? "长度" : "时间";
+        return LABEL_SORT_KEY_SUMMARY_PREFIX + label + "（点击切换）";
+    }
+
+    private static ListFilterProxy.SortKey nextSortKey(String cur) {
+        ListFilterProxy.SortKey k = parseSortKey(cur);
+        return k == ListFilterProxy.SortKey.TIME ? ListFilterProxy.SortKey.COUNT
+                : k == ListFilterProxy.SortKey.COUNT ? ListFilterProxy.SortKey.LENGTH
+                : ListFilterProxy.SortKey.TIME;
+    }
+
+    /**
+     * 可点击行 builder（白底条目 + 左侧标题/说明 + 右侧 › 指示，与开关卡片同视觉）。
+     * 点击行为由调用方传入；说明行由调用方持有引用自行更新。
+     */
+    private static void addActionCard(Activity activity, LinearLayout root, int dp8, int dp16,
+                                      String title, final TextView summaryView, String summary,
+                                      View.OnClickListener listener) {
+        LinearLayout card = new LinearLayout(activity);
+        card.setOrientation(LinearLayout.HORIZONTAL);
+        card.setGravity(Gravity.CENTER_VERTICAL);
+        card.setBackgroundColor(Color.WHITE);
+        card.setPadding(dp16, dp16, dp16, dp16);
+        LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        root.addView(card, cardLp);
+
+        LinearLayout texts = new LinearLayout(activity);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams textsLp = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        textsLp.gravity = Gravity.CENTER_VERTICAL;
+        card.addView(texts, textsLp);
+
+        TextView name = new TextView(activity);
+        name.setText(title);
+        name.setTextSize(16);
+        name.setTextColor(COLOR_TITLE_TEXT);
+        texts.addView(name);
+
+        summaryView.setText(summary);
+        summaryView.setTextSize(12);
+        summaryView.setTextColor(COLOR_DESC_TEXT);
+        summaryView.setPadding(0, dp8, 0, 0);
+        texts.addView(summaryView);
+
+        TextView arrow = new TextView(activity);
+        arrow.setText("›");
+        arrow.setTextSize(20);
+        arrow.setTextColor(COLOR_DESC_TEXT);
+        card.addView(arrow);
+
+        card.setOnClickListener(listener);
     }
 
     /**

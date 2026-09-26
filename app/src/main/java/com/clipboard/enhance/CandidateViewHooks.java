@@ -54,6 +54,9 @@ public final class CandidateViewHooks {
     /** 模块按钮矩形快照（写时整体替换、读时一次快照：绘制线程写/触摸线程读，避免Rect原地修改竞态；null=无效/隐藏） */
     private static volatile Rect sSearchRect = null;
     private static volatile Rect sCommitAllRect = null;
+    /** 排序字段/方向按钮矩形（仅非整理态，与搜索键同排向左链） */
+    private static volatile Rect sSortKeyRect = null;
+    private static volatile Rect sSortDirRect = null;
     /** 触摸去抖状态：记录上次动作的时间与坐标 */
     private static volatile long sLastTouchTime = 0L;
     private static volatile float sLastTouchX = 0f;
@@ -114,6 +117,8 @@ public final class CandidateViewHooks {
             Rect hit = drawTextButton(view, canvas, paint, label, left, h, false);
             sSearchRect = new Rect(hit);
             sCommitAllRect = null; // 非整理态无此按钮
+            // ---- 排序双键：向左链在搜索键左侧（字段+方向，点分别切换） ----
+            drawSortButtons(view, canvas, paint, h, left);
         } else {
             // ---- 整理态：「输入全部(N)」画在「删除」(mClearButtonWholeRect) 左侧 ----
             Rect deleteRect = nativeButtonRect(view, null, "mClearButtonWholeRect");
@@ -137,7 +142,41 @@ public final class CandidateViewHooks {
             Rect hit = drawTextButton(view, canvas, paint, label, left, h, true);
             sCommitAllRect = new Rect(hit);
             sSearchRect = null;
+            sSortKeyRect = null;
+            sSortDirRect = null;
         }
+    }
+
+    /**
+     * 排序双键绘制：搜索键左侧向左链。
+     * 字段键文案=当前字段（时间/热度/长度），方向键=↓/↑；链式坐标天然不与搜索键重叠，
+     * 只需守卫左边界（出界即隐藏，宁缺勿挤 title）：先舍方向键、再舍字段键。
+     *
+     * @param searchLeft 已绘制的搜索键 left（新键在其左侧继续链）
+     */
+    private static void drawSortButtons(View view, Canvas canvas, Paint paint, int h, int searchLeft) {
+        String keyLabel = ListFilterProxy.sortKeyLabel();
+        float keyW = textButtonWidth(paint, keyLabel);
+        int keyRight = (int) (searchLeft - BTN_GAP_PX);
+        int keyLeft = (int) (keyRight - keyW);
+        if (keyLeft < 0) {
+            sSortKeyRect = null;
+            sSortDirRect = null;
+            return;
+        }
+        Rect keyHit = drawTextButton(view, canvas, paint, keyLabel, keyLeft, h, false);
+        sSortKeyRect = new Rect(keyHit);
+
+        String dirLabel = ListFilterProxy.sortDirLabel();
+        float dirW = textButtonWidth(paint, dirLabel);
+        int dirRight = (int) (keyLeft - BTN_GAP_PX);
+        int dirLeft = (int) (dirRight - dirW);
+        if (dirLeft < 0) {
+            sSortDirRect = null; // 方向键放不下：只留字段键，仍可用
+            return;
+        }
+        Rect dirHit = drawTextButton(view, canvas, paint, dirLabel, dirLeft, h, false);
+        sSortDirRect = new Rect(dirHit);
     }
 
     /**
@@ -251,6 +290,33 @@ public final class CandidateViewHooks {
                                 }
                                 param.setResult(HIT_SUPPRESSED); // 屏蔽原生命中
                                 return;
+                            }
+                            // 排序双键：字段键循环字段，方向键翻转正倒序（仅非整理态）
+                            if (!selecting) {
+                                Rect sortKeyHit = sSortKeyRect;
+                                if (sortKeyHit != null && sortKeyHit.contains(x, y)) {
+                                    if (debounceTouch(x, y)) {
+                                        ListFilterProxy.cycleSortKey();
+                                        KeyboardListHooks.swapList();
+                                        SogouSettingsInjector.saveSortSetting();
+                                        XposedBridge.log(HookUtil.LOG_TAG + "sort key -> "
+                                                + ListFilterProxy.sortKeyLabel());
+                                    }
+                                    param.setResult(HIT_SUPPRESSED);
+                                    return;
+                                }
+                                Rect sortDirHit = sSortDirRect;
+                                if (sortDirHit != null && sortDirHit.contains(x, y)) {
+                                    if (debounceTouch(x, y)) {
+                                        ListFilterProxy.toggleSortDirection();
+                                        KeyboardListHooks.swapList();
+                                        SogouSettingsInjector.saveSortSetting();
+                                        XposedBridge.log(HookUtil.LOG_TAG + "sort dir -> "
+                                                + ListFilterProxy.sortDirLabel());
+                                    }
+                                    param.setResult(HIT_SUPPRESSED);
+                                    return;
+                                }
                             }
                             if (selecting) {
                                 Rect commitHit = sCommitAllRect;

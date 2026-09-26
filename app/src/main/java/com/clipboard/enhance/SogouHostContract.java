@@ -39,6 +39,23 @@ public final class SogouHostContract {
     public static final String FIELD_ADAPTER_LIST = "j";
     public static final String FIELD_ITEM_TEXT = "d";
     public static final String FIELD_ADAPTER = "N";
+    /** 条目时间/主键字段（c=Time long，b=_id Long） */
+    public static final String FIELD_ITEM_TIME = "c";
+    public static final String FIELD_ITEM_ID = "b";
+    /** 长按弹窗：Keyboard.O=菜单popup，P=菜单处理器，b=处理器内选中下标，T=ViewModel */
+    public static final String FIELD_KEYBOARD_POPUP = "O";
+    public static final String FIELD_MENU_HANDLER = "P";
+    public static final String FIELD_MENU_INDEX = "b";
+    public static final String FIELD_VIEW_MODEL = "T";
+    /** 宿主 R.id（长按弹窗行 tv_split_word 作编辑行锚点） */
+    public static final String CLS_R_ID = "com.sohu.inputmethod.sogou.R$id";
+    public static final String RID_SPLIT_WORD = "tv_split_word";
+    /** VPA 时间数组合并：addTimeArray(List<Long>, long) */
+    public static final String CLS_VPA_MANAGER =
+            "com.sohu.inputmethod.clipboard.vpaclipboard.VpaClipboardManager";
+    public static final String METHOD_ADD_TIME_ARRAY = "addTimeArray";
+    /** 宿主内容长度截断：读链 G() 超 5000 截断，写侧对齐 */
+    public static final int MAX_CONTENT_LEN = 5000;
 
     /* ================= 输入链路（Route X） ================= */
     public static final String INPUT_LOGIC = "com.sohu.inputmethod.input.InputLogic";
