@@ -39,17 +39,20 @@ public final class SogouHostContract {
     public static final String FIELD_ADAPTER_LIST = "j";
     public static final String FIELD_ITEM_TEXT = "d";
     public static final String FIELD_ADAPTER = "N";
-    /** 条目时间/主键字段（c=Time long，b=_id Long） */
+    /** 条目时间字段（c=Time long） */
     public static final String FIELD_ITEM_TIME = "c";
-    public static final String FIELD_ITEM_ID = "b";
     /** 长按弹窗：Keyboard.O=菜单popup，P=菜单处理器，b=处理器内选中下标，T=ViewModel */
     public static final String FIELD_KEYBOARD_POPUP = "O";
     public static final String FIELD_MENU_HANDLER = "P";
     public static final String FIELD_MENU_INDEX = "b";
     public static final String FIELD_VIEW_MODEL = "T";
-    /** 宿主 R.id（长按弹窗行 tv_split_word 作编辑行锚点） */
+    /** 宿主 R.id（长按弹窗三行：删除 / 转快捷 / 分词，取最末可见行为编辑锚点） */
     public static final String CLS_R_ID = "com.sohu.inputmethod.sogou.R$id";
     public static final String RID_SPLIT_WORD = "tv_split_word";
+    public static final String RID_DELETE_WORDS = "tv_delete_words";
+    public static final String RID_MOVE_SHORTCUT = "tv_alert_move_shortcut";
+    /** 弹窗定高白卡（新行挂载锚点） */
+    public static final String RID_LI_ALL = "li_all";
     /** VPA 时间数组合并：addTimeArray(List<Long>, long) */
     public static final String CLS_VPA_MANAGER =
             "com.sohu.inputmethod.clipboard.vpaclipboard.VpaClipboardManager";
@@ -68,6 +71,8 @@ public final class SogouHostContract {
     public static final String IME_SOGOU = "com.sohu.inputmethod.sogou.SogouIME";
     /** 路由导航器：搜索态入口劫持为完成的统一漏斗（工具栏/更多菜单/自定义行） */
     public static final String ROUTE_NAV = "com.sogou.lib.spage.a";
+    /** 长按菜单弹窗包装（show 方法 M(View,int,int,int)，编辑行在此之前注入） */
+    public static final String CLS_POPUP = "com.sogou.bu.basic.ui.popupwindow.c";
     /** 滚动拼音候选视图：搜索态首选高亮宿主（选中色由 q2.f7 逐次重算） */
     public static final String SCROLL_CANDIDATE = "com.sohu.inputmethod.sogou.q2";
     /** 自定义工具栏功能行：搜索态剪贴板图标染色宿主（条目身份为功能 id，剪贴板=22） */

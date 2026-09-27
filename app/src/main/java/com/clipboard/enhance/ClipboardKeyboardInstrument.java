@@ -38,6 +38,7 @@ public final class ClipboardKeyboardInstrument {
         try {
             CandidateViewHooks.init(cl);
             KeyboardListHooks.init(cl);
+            ClipboardEditController.init(cl);
             PasteCountHooks.init(cl);
             QuickPasteHooks.init(cl);
             SearchModeController.init(cl);
